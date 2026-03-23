@@ -1,0 +1,17 @@
+[package]
+name = "armcrunch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+rustfft = "6"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "square_mod"
+harness = false
