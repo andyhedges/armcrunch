@@ -82,5 +82,40 @@ fn bench_fft_phases(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_square_mod, bench_fft_phases);
+/// Benchmark at 8x the "small" size to show asymptotic separation.
+///
+/// At 262K bits the O(n) per-call overhead in FftSquarer (bytes conversion,
+/// BigUint allocation, Kbn mod) becomes a larger fraction of total time versus
+/// the O(n log n) FFT work — widening the gap over DwtSquarer, which keeps x
+/// in the transform domain and does no allocations in the hot path.
+///
+/// naive and NTT variants are excluded: they are already too slow at this size.
+fn bench_square_mod_large(c: &mut Criterion) {
+    let k = 1u64;
+    let exp = 262144u64; // 2^18 — clean power-of-2, b_lo is an exact integer
+    let kbn = Kbn::new(k, exp);
+    let modulus = kbn.value();
+    let mut x = BigUint::from(3u32).modpow(&BigUint::from(1000u32), &modulus);
+    let mut squarer_fft = FftSquarer::new(&modulus);
+    let mut squarer_dwt = DwtSquarer::new(k, exp, &x);
+
+    let mut group = c.benchmark_group("square_mod_large");
+    group.sample_size(20);
+
+    group.bench_function("kbn", |b| {
+        b.iter(|| square_mod_kbn(&mut x, k, exp, &modulus));
+    });
+
+    group.bench_function("fft", |b| {
+        b.iter(|| squarer_fft.square_kbn(&mut x, k, exp, &modulus));
+    });
+
+    group.bench_function("dwt", |b| {
+        b.iter(|| squarer_dwt.square());
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_square_mod, bench_fft_phases, bench_square_mod_large);
 criterion_main!(benches);
