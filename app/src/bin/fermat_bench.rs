@@ -143,13 +143,36 @@ fn find_gwnum_binary() -> Option<(std::path::PathBuf, &'static str)> {
 // Main benchmark flow
 // ---------------------------------------------------------------------------
 
+/// Compute base^exp mod modulus using FFT-accelerated square-and-multiply.
+/// Much faster than BigUint::modpow for large moduli since squarings use
+/// O(n log n) FFT instead of O(n²) schoolbook multiplication.
+fn fast_modpow(base: u64, exp: u64, modulus: &BigUint, n: u64) -> BigUint {
+    if exp == 0 {
+        return BigUint::one();
+    }
+    let mut result = BigUint::from(base);
+    let mut squarer = FftSquarer::new(modulus);
+    let bits = 64 - exp.leading_zeros();
+
+    // Binary exponentiation: scan bits from second-highest to lowest
+    for i in (0..bits - 1).rev() {
+        // Square: result = result² mod M
+        squarer.square_kbn(&mut result, K, n, modulus);
+
+        // Multiply by base if bit is set: result = result * base mod M
+        if (exp >> i) & 1 == 1 {
+            result = (result * base) % modulus;
+        }
+    }
+    result
+}
+
 fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64, include_kbn: bool) {
     let modulus = kbn.value();
-    let a_big = BigUint::from(BASE);
 
     println!("Computing a^k mod M (k={})...", K);
     let t0 = Instant::now();
-    let x0 = a_big.modpow(&BigUint::from(K), &modulus);
+    let x0 = fast_modpow(BASE, K, &modulus, N);
     println!("  done in {:.1}s\n", t0.elapsed().as_secs_f64());
 
     // Phase 1: Warmup — estimate throughput of each method (50 iters each)
