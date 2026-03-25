@@ -144,15 +144,20 @@ impl TwiddleTable {
 /// In-place radix-2 DIT FFT using precomputed twiddle factors.
 /// No normalization applied.
 fn complex_fft_precomp(data: &mut [Complex<f64>], n: usize, twiddles: &[Vec<(f64, f64)>]) {
-    if n <= 1 { return; }
+    if n <= 1 {
+        return;
+    }
 
     bit_reverse_permute(data, n);
 
-    let mut half = 1;
-    let mut pass = 0;
-    while half < n {
-        let step = half * 2;
-        let tw = &twiddles[pass];
+    let stages = twiddles.len();
+    let mut pass = 0usize;
+
+    // If log2(n) is odd, do one radix-2 pass first.
+    if stages & 1 == 1 {
+        let half = 1usize;
+        let step = 2usize;
+        let tw = &twiddles[0];
 
         for k in 0..half {
             let (w_re, w_im) = tw[k];
@@ -167,8 +172,70 @@ fn complex_fft_precomp(data: &mut [Complex<f64>], n: usize, twiddles: &[Vec<(f64
                 j += step;
             }
         }
-        half = step;
-        pass += 1;
+
+        pass = 1;
+    }
+
+    // Fuse passes p and p+1 together over groups of 4*h.
+    while pass + 1 < stages {
+        let h = 1usize << pass;
+        let h2 = h * 2;
+        let step = h2 * 2;
+
+        let tw1 = &twiddles[pass];
+        let tw2 = &twiddles[pass + 1];
+
+        for k in 0..h {
+            let (w1_re, w1_im) = tw1[k];
+            let (w2a_re, w2a_im) = tw2[k];
+            let (w2b_re, w2b_im) = tw2[k + h];
+
+            let mut j = k;
+            while j < n {
+                let i1 = j + h;
+                let i2 = j + h2;
+                let i3 = i2 + h;
+
+                let a0 = data[j];
+                let a1_raw = data[i1];
+                let a2 = data[i2];
+                let a3_raw = data[i3];
+
+                // Inner radix-2 level (twiddle w1).
+                let a1 = Complex::new(
+                    w1_re * a1_raw.re - w1_im * a1_raw.im,
+                    w1_re * a1_raw.im + w1_im * a1_raw.re,
+                );
+                let a3 = Complex::new(
+                    w1_re * a3_raw.re - w1_im * a3_raw.im,
+                    w1_re * a3_raw.im + w1_im * a3_raw.re,
+                );
+
+                let b0 = a0 + a1;
+                let b1 = a0 - a1;
+                let b2 = a2 + a3;
+                let b3 = a2 - a3;
+
+                // Outer radix-2 level (twiddles w2a/w2b).
+                let c2 = Complex::new(
+                    w2a_re * b2.re - w2a_im * b2.im,
+                    w2a_re * b2.im + w2a_im * b2.re,
+                );
+                let c3 = Complex::new(
+                    w2b_re * b3.re - w2b_im * b3.im,
+                    w2b_re * b3.im + w2b_im * b3.re,
+                );
+
+                data[j] = b0 + c2;
+                data[i2] = b0 - c2;
+                data[i1] = b1 + c3;
+                data[i3] = b1 - c3;
+
+                j += step;
+            }
+        }
+
+        pass += 2;
     }
 }
 
