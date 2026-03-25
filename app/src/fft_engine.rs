@@ -2,8 +2,8 @@
 //!
 //! The `FftEngine` trait provides a uniform interface for real-to-complex
 //! and complex-to-real FFT operations.  The default implementation wraps
-//! the `realfft` crate (portable, works on all architectures).  A future
-//! NEON-accelerated implementation can be swapped in on ARM64.
+//! the `realfft` crate (portable, works on all architectures).  Optional
+//! platform engines can be swapped in behind cargo features.
 
 #[cfg(feature = "fftw")]
 use fftw::array::AlignedVec;
@@ -11,8 +11,10 @@ use fftw::array::AlignedVec;
 use fftw::plan::{C2RPlan, C2RPlan64, R2CPlan, R2CPlan64};
 #[cfg(feature = "fftw")]
 use fftw::types::{c64, Flag};
-#[cfg(feature = "fftw")]
+#[cfg(any(feature = "fftw", all(feature = "vdsp", target_os = "macos")))]
 use std::cell::UnsafeCell;
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+use std::ffi::c_void;
 
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
@@ -93,6 +95,254 @@ impl FftEngine for RealFftEngine {
 
     fn inverse_scratch_len(&self) -> usize {
         self.c2r.get_scratch_len()
+    }
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+#[repr(C)]
+struct DSPDoubleComplex {
+    real: f64,
+    imag: f64,
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+#[repr(C)]
+struct DSPDoubleSplitComplex {
+    realp: *mut f64,
+    imagp: *mut f64,
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+#[allow(non_upper_case_globals)]
+const kFFTDirection_Forward: i32 = 1;
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+#[allow(non_upper_case_globals)]
+const kFFTDirection_Inverse: i32 = -1;
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+#[allow(non_upper_case_globals)]
+const kFFTRadix2: i32 = 0;
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+unsafe extern "C" {
+    fn vDSP_create_fftsetupD(log2n: u64, radix: i32) -> *mut c_void;
+    fn vDSP_destroy_fftsetupD(setup: *mut c_void);
+    fn vDSP_fft_zriptD(
+        setup: *mut c_void,
+        c: *const DSPDoubleSplitComplex,
+        ic: i64,
+        buffer: *const DSPDoubleSplitComplex,
+        log2n: u64,
+        direction: i32,
+    );
+    fn vDSP_ctozD(
+        z: *const DSPDoubleComplex,
+        iz: i64,
+        c: *const DSPDoubleSplitComplex,
+        ic: i64,
+        n: u64,
+    );
+    fn vDSP_ztocD(
+        c: *const DSPDoubleSplitComplex,
+        ic: i64,
+        z: *mut DSPDoubleComplex,
+        iz: i64,
+        n: u64,
+    );
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+#[inline]
+fn make_split_complex(realp: &mut [f64], imagp: &mut [f64]) -> DSPDoubleSplitComplex {
+    debug_assert_eq!(realp.len(), imagp.len());
+    DSPDoubleSplitComplex {
+        realp: realp.as_mut_ptr(),
+        imagp: imagp.as_mut_ptr(),
+    }
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+struct VdspInner {
+    setup: *mut c_void,
+    log2n: u64,
+    len: usize,
+    split_re: Vec<f64>,
+    split_im: Vec<f64>,
+    temp_re: Vec<f64>,
+    temp_im: Vec<f64>,
+}
+
+/// FFT engine backed by Apple Accelerate vDSP real transforms.
+///
+/// Uses `vDSP_fft_zriptD` and adapts vDSP scaling to this crate's
+/// unnormalized forward/inverse convention:
+/// - forward output is divided by 2
+/// - inverse output is multiplied by 2
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+pub struct VdspEngine {
+    inner: UnsafeCell<VdspInner>,
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+impl VdspEngine {
+    /// Create a new vDSP engine for transforms of length `len`.
+    pub fn new(len: usize) -> Self {
+        assert!(len.is_power_of_two(), "vDSP requires power-of-two FFT sizes");
+        assert!(len >= 2, "FFT length must be >= 2");
+
+        let log2n = len.trailing_zeros() as u64;
+        let setup = unsafe {
+            // SAFETY: Plain FFI call with POD arguments.
+            vDSP_create_fftsetupD(log2n, kFFTRadix2)
+        };
+        assert!(!setup.is_null(), "failed to create vDSP FFT setup");
+
+        let n_over_2 = len / 2;
+        Self {
+            inner: UnsafeCell::new(VdspInner {
+                setup,
+                log2n,
+                len,
+                split_re: vec![0.0; n_over_2],
+                split_im: vec![0.0; n_over_2],
+                temp_re: vec![0.0; n_over_2],
+                temp_im: vec![0.0; n_over_2],
+            }),
+        }
+    }
+}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+impl Drop for VdspEngine {
+    fn drop(&mut self) {
+        let inner = unsafe {
+            // SAFETY: &mut self guarantees exclusive access.
+            &mut *self.inner.get()
+        };
+
+        if !inner.setup.is_null() {
+            unsafe {
+                // SAFETY: setup was allocated by vDSP_create_fftsetupD.
+                vDSP_destroy_fftsetupD(inner.setup);
+            }
+            inner.setup = std::ptr::null_mut();
+        }
+    }
+}
+
+// SAFETY: VdspEngine can be moved across threads (Send) but is intentionally
+// !Sync. Mutable access is internal and mediated by UnsafeCell.
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+unsafe impl Send for VdspEngine {}
+
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+impl FftEngine for VdspEngine {
+    fn forward(&self, input: &mut [f64], output: &mut [Complex<f64>], _scratch: &mut [Complex<f64>]) {
+        let inner = unsafe {
+            // SAFETY: VdspEngine is !Sync; caller cannot race shared mutable access.
+            &mut *self.inner.get()
+        };
+
+        assert_eq!(input.len(), inner.len, "forward input length mismatch");
+        assert_eq!(output.len(), inner.len / 2 + 1, "forward output length mismatch");
+
+        let n_over_2 = inner.len / 2;
+        let split = make_split_complex(&mut inner.split_re, &mut inner.split_im);
+        let temp = make_split_complex(&mut inner.temp_re, &mut inner.temp_im);
+
+        unsafe {
+            // SAFETY: Interpret N real samples as N/2 interleaved complex pairs.
+            vDSP_ctozD(
+                input.as_ptr().cast::<DSPDoubleComplex>(),
+                2,
+                &split as *const DSPDoubleSplitComplex,
+                1,
+                n_over_2 as u64,
+            );
+
+            // SAFETY: split/temp buffers match setup length and remain valid.
+            vDSP_fft_zriptD(
+                inner.setup,
+                &split as *const DSPDoubleSplitComplex,
+                1,
+                &temp as *const DSPDoubleSplitComplex,
+                inner.log2n,
+                kFFTDirection_Forward,
+            );
+        }
+
+        // vDSP forward scales by 2 for real FFT; divide by 2 to provide
+        // unnormalized-forward output consistent with other engines.
+        output[0] = Complex::new(inner.split_re[0] * 0.5, 0.0);
+        for k in 1..n_over_2 {
+            output[k] = Complex::new(inner.split_re[k] * 0.5, inner.split_im[k] * 0.5);
+        }
+        output[n_over_2] = Complex::new(inner.split_im[0] * 0.5, 0.0);
+    }
+
+    fn inverse(&self, input: &mut [Complex<f64>], output: &mut [f64], _scratch: &mut [Complex<f64>]) {
+        let inner = unsafe {
+            // SAFETY: Same serialization rationale as in `forward`.
+            &mut *self.inner.get()
+        };
+
+        assert_eq!(input.len(), inner.len / 2 + 1, "inverse input length mismatch");
+        assert_eq!(output.len(), inner.len, "inverse output length mismatch");
+
+        let n_over_2 = inner.len / 2;
+
+        // Pack our N/2+1 Hermitian spectrum into vDSP's packed split format.
+        inner.split_re[0] = input[0].re;
+        inner.split_im[0] = input[n_over_2].re;
+        for k in 1..n_over_2 {
+            inner.split_re[k] = input[k].re;
+            inner.split_im[k] = input[k].im;
+        }
+
+        let split = make_split_complex(&mut inner.split_re, &mut inner.split_im);
+        let temp = make_split_complex(&mut inner.temp_re, &mut inner.temp_im);
+
+        unsafe {
+            // SAFETY: split/temp buffers are valid and sized for this transform.
+            vDSP_fft_zriptD(
+                inner.setup,
+                &split as *const DSPDoubleSplitComplex,
+                1,
+                &temp as *const DSPDoubleSplitComplex,
+                inner.log2n,
+                kFFTDirection_Inverse,
+            );
+
+            // SAFETY: Write N reals as N/2 interleaved complex pairs.
+            vDSP_ztocD(
+                &split as *const DSPDoubleSplitComplex,
+                1,
+                output.as_mut_ptr().cast::<DSPDoubleComplex>(),
+                2,
+                n_over_2 as u64,
+            );
+        }
+
+        // vDSP inverse scales by 1/2 for real FFT; multiply by 2 so this engine
+        // returns unnormalized inverse output like other backends.
+        for v in output.iter_mut() {
+            *v *= 2.0;
+        }
+    }
+
+    fn len(&self) -> usize {
+        let inner = unsafe {
+            // SAFETY: Immutable interior access.
+            &*self.inner.get()
+        };
+        inner.len
+    }
+
+    fn forward_scratch_len(&self) -> usize {
+        0
+    }
+
+    fn inverse_scratch_len(&self) -> usize {
+        0
     }
 }
 

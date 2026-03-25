@@ -20,9 +20,11 @@ use num_traits::Zero;
 use rustfft::num_complex::Complex;
 
 use crate::fft_engine::FftEngine;
-#[cfg(feature = "fftw")]
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+use crate::fft_engine::VdspEngine;
+#[cfg(all(not(all(feature = "vdsp", target_os = "macos")), feature = "fftw"))]
 use crate::fft_engine::FftwEngine;
-#[cfg(not(feature = "fftw"))]
+#[cfg(all(not(all(feature = "vdsp", target_os = "macos")), not(feature = "fftw")))]
 use crate::fft_engine::RealFftEngine;
 
 // ---------------------------------------------------------------------------
@@ -44,12 +46,17 @@ fn arith_shr(val: i64, width: u64) -> i64 {
     if width >= 64 { if val >= 0 { 0 } else { -1 } } else { val >> width }
 }
 
-#[cfg(feature = "fftw")]
+#[cfg(all(feature = "vdsp", target_os = "macos"))]
+fn make_engine(fft_size: usize) -> Box<dyn FftEngine> {
+    Box::new(VdspEngine::new(fft_size))
+}
+
+#[cfg(all(not(all(feature = "vdsp", target_os = "macos")), feature = "fftw"))]
 fn make_engine(fft_size: usize) -> Box<dyn FftEngine> {
     Box::new(FftwEngine::new(fft_size))
 }
 
-#[cfg(not(feature = "fftw"))]
+#[cfg(all(not(all(feature = "vdsp", target_os = "macos")), not(feature = "fftw")))]
 fn make_engine(fft_size: usize) -> Box<dyn FftEngine> {
     Box::new(RealFftEngine::new(fft_size))
 }
@@ -86,6 +93,7 @@ pub struct DwtSquarer {
 /// These "5-smooth" (or "regular") numbers are optimal for FFT performance
 /// since rustfft has optimized radix-2, radix-3, and radix-5 kernels.
 /// The result is always even (required by realfft).
+#[cfg(not(all(feature = "vdsp", target_os = "macos")))]
 fn smooth_fft_size(min: usize) -> usize {
     let bound = min.next_power_of_two() * 2;
     let mut candidates = Vec::new();
@@ -108,6 +116,19 @@ fn smooth_fft_size(min: usize) -> usize {
     candidates.into_iter().next().unwrap_or_else(|| min.next_power_of_two())
 }
 
+#[inline]
+fn choose_fft_size(min: usize) -> usize {
+    #[cfg(all(feature = "vdsp", target_os = "macos"))]
+    {
+        min.next_power_of_two()
+    }
+
+    #[cfg(not(all(feature = "vdsp", target_os = "macos")))]
+    {
+        smooth_fft_size(min)
+    }
+}
+
 impl DwtSquarer {
     pub fn new(k: u64, exp: u64, x: &BigUint) -> Self {
         let modulus = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
@@ -125,7 +146,7 @@ impl DwtSquarer {
                 let b_max = ((exp as usize + n - 1) / n) as f64;
                 let headroom = (53.0 - (n as f64).log2()) / 2.0;
                 if b_max <= headroom { break n; }
-                n = smooth_fft_size(n + 1);
+                n = choose_fft_size(n + 1);
                 assert!(n <= (1 << 28), "FFT length overflow");
             }
         };
@@ -178,7 +199,7 @@ impl DwtSquarer {
     fn new_zero_padded(k: u64, exp: u64, modulus: &BigUint, x: &BigUint) -> Self {
         let m_bytes = (modulus.bits() as usize + 7) / 8;
         let n_limbs = (m_bytes + 1) / 2;
-        let fft_size = smooth_fft_size(2 * n_limbs);
+        let fft_size = choose_fft_size(2 * n_limbs);
 
         let engine = make_engine(fft_size);
         let scratch_fwd = vec![Complex::new(0.0, 0.0); engine.forward_scratch_len()];

@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 fftw = ["dep:fftw"]
+vdsp = []
 
 [dependencies]
 num-bigint = "0.4"
