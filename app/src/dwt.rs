@@ -17,9 +17,9 @@
 
 use num_bigint::BigUint;
 use num_traits::Zero;
-use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
-use std::sync::Arc;
+
+use crate::fft_engine::{FftEngine, RealFftEngine};
 
 // ---------------------------------------------------------------------------
 // Shift-safe helpers
@@ -27,44 +27,21 @@ use std::sync::Arc;
 
 #[inline]
 fn limb_mask_u64(width: u64) -> u64 {
-    if width >= 64 {
-        u64::MAX
-    } else if width == 0 {
-        0
-    } else {
-        (1u64 << width) - 1
-    }
+    if width >= 64 { u64::MAX } else if width == 0 { 0 } else { (1u64 << width) - 1 }
 }
 
 #[inline]
 fn limb_mask_i64(width: u64) -> i64 {
-    if width >= 63 {
-        i64::MAX
-    } else if width == 0 {
-        0
-    } else {
-        (1i64 << width) - 1
-    }
+    if width >= 63 { i64::MAX } else if width == 0 { 0 } else { (1i64 << width) - 1 }
 }
 
 #[inline]
 fn arith_shr(val: i64, width: u64) -> i64 {
-    if width >= 64 {
-        if val >= 0 {
-            0
-        } else {
-            -1
-        }
-    } else {
-        val >> width
-    }
+    if width >= 64 { if val >= 0 { 0 } else { -1 } } else { val >> width }
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Ibdwt,
-    ZeroPadded,
-}
+enum Mode { Ibdwt, ZeroPadded }
 
 pub struct DwtSquarer {
     mode: Mode,
@@ -73,12 +50,11 @@ pub struct DwtSquarer {
     exp: u64,
     fft_size: usize,
 
-    r2c: Arc<dyn RealToComplex<f64>>,
-    c2r: Arc<dyn ComplexToReal<f64>>,
-    real_buf: Vec<f64>,          // length N (real input/output)
-    spectrum: Vec<Complex<f64>>, // length N/2 + 1 (frequency domain)
-    scratch_r2c: Vec<Complex<f64>>,
-    scratch_c2r: Vec<Complex<f64>>,
+    engine: Box<dyn FftEngine>,
+    real_buf: Vec<f64>,
+    spectrum: Vec<Complex<f64>>,
+    scratch_fwd: Vec<Complex<f64>>,
+    scratch_inv: Vec<Complex<f64>>,
 
     // IBDWT fields (empty Vecs for ZeroPadded)
     bit_pos: Vec<u64>,
@@ -108,9 +84,7 @@ impl DwtSquarer {
             loop {
                 let b_max = ((exp as usize + n - 1) / n) as f64;
                 let headroom = (53.0 - (n as f64).log2()) / 2.0;
-                if b_max <= headroom && n.is_power_of_two() {
-                    break n;
-                }
+                if b_max <= headroom && n.is_power_of_two() { break n; }
                 n *= 2;
                 assert!(n <= (1 << 28), "FFT length overflow");
             }
@@ -118,11 +92,8 @@ impl DwtSquarer {
 
         let mut bit_pos = Vec::with_capacity(fft_size + 1);
         for j in 0..=fft_size {
-            let bp = if j == 0 {
-                0u64
-            } else {
-                ((exp as u128 * j as u128 + fft_size as u128 - 1) / fft_size as u128) as u64
-            };
+            let bp = if j == 0 { 0u64 }
+            else { ((exp as u128 * j as u128 + fft_size as u128 - 1) / fft_size as u128) as u64 };
             bit_pos.push(bp);
         }
 
@@ -142,32 +113,21 @@ impl DwtSquarer {
             m_limbs[j] = extract_bits(&m_bytes, bit_pos[j], bit_pos[j + 1] - bit_pos[j]) as i64;
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let r2c = planner.plan_fft_forward(fft_size);
-        let c2r = planner.plan_fft_inverse(fft_size);
-        let scratch_r2c_len = r2c.get_scratch_len();
-        let scratch_c2r_len = c2r.get_scratch_len();
+        let engine = Box::new(RealFftEngine::new(fft_size));
+        let scratch_fwd = vec![Complex::new(0.0, 0.0); engine.forward_scratch_len()];
+        let scratch_inv = vec![Complex::new(0.0, 0.0); engine.inverse_scratch_len()];
 
         let mut sq = DwtSquarer {
             mode: Mode::Ibdwt,
             modulus: modulus.clone(),
-            k,
-            exp,
-            fft_size,
-
-            r2c,
-            c2r,
+            k, exp, fft_size,
+            engine,
             real_buf: vec![0.0; fft_size],
             spectrum: vec![Complex::new(0.0, 0.0); fft_size / 2 + 1],
-            scratch_r2c: vec![Complex::new(0.0, 0.0); scratch_r2c_len],
-            scratch_c2r: vec![Complex::new(0.0, 0.0); scratch_c2r_len],
-
-            bit_pos,
-            fwd,
-            inv_w,
-            m_limbs,
+            scratch_fwd,
+            scratch_inv,
+            bit_pos, fwd, inv_w, m_limbs,
             ibdwt_limbs: vec![0i64; fft_size],
-
             value: None,
             zp_limbs: Vec::new(),
         };
@@ -180,32 +140,24 @@ impl DwtSquarer {
         let n_limbs = (m_bytes + 1) / 2;
         let fft_size = (2 * n_limbs).next_power_of_two();
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let r2c = planner.plan_fft_forward(fft_size);
-        let c2r = planner.plan_fft_inverse(fft_size);
-        let scratch_r2c_len = r2c.get_scratch_len();
-        let scratch_c2r_len = c2r.get_scratch_len();
+        let engine = Box::new(RealFftEngine::new(fft_size));
+        let scratch_fwd = vec![Complex::new(0.0, 0.0); engine.forward_scratch_len()];
+        let scratch_inv = vec![Complex::new(0.0, 0.0); engine.inverse_scratch_len()];
 
         DwtSquarer {
             mode: Mode::ZeroPadded,
             modulus: modulus.clone(),
-            k,
-            exp,
-            fft_size,
-
-            r2c,
-            c2r,
+            k, exp, fft_size,
+            engine,
             real_buf: vec![0.0; fft_size],
             spectrum: vec![Complex::new(0.0, 0.0); fft_size / 2 + 1],
-            scratch_r2c: vec![Complex::new(0.0, 0.0); scratch_r2c_len],
-            scratch_c2r: vec![Complex::new(0.0, 0.0); scratch_c2r_len],
-
+            scratch_fwd,
+            scratch_inv,
             bit_pos: Vec::new(),
             fwd: Vec::new(),
             inv_w: Vec::new(),
             m_limbs: Vec::new(),
             ibdwt_limbs: Vec::new(),
-
             value: Some(x.clone()),
             zp_limbs: vec![0i64; fft_size + 1],
         }
@@ -236,28 +188,13 @@ impl DwtSquarer {
             let width = self.bit_pos[j + 1] - start;
             self.real_buf[j] = extract_bits(&bytes, start, width) as f64 * self.fwd[j];
         }
-
-        self.r2c
-            .process_with_scratch(
-                &mut self.real_buf,
-                &mut self.spectrum,
-                &mut self.scratch_r2c,
-            )
-            .expect("IBDWT real-to-complex FFT failed");
+        self.engine.forward(&mut self.real_buf, &mut self.spectrum, &mut self.scratch_fwd);
     }
 
     fn ibdwt_square(&mut self) {
-        for c in &mut self.spectrum {
-            *c = *c * *c;
-        }
+        for c in &mut self.spectrum { *c = *c * *c; }
 
-        self.c2r
-            .process_with_scratch(
-                &mut self.spectrum,
-                &mut self.real_buf,
-                &mut self.scratch_c2r,
-            )
-            .expect("IBDWT complex-to-real IFFT failed");
+        self.engine.inverse(&mut self.spectrum, &mut self.real_buf, &mut self.scratch_inv);
 
         let inv_n = 1.0 / self.fft_size as f64;
         for j in 0..self.fft_size {
@@ -270,24 +207,14 @@ impl DwtSquarer {
         for j in 0..self.fft_size {
             self.real_buf[j] = self.ibdwt_limbs[j] as f64 * self.fwd[j];
         }
-
-        self.r2c
-            .process_with_scratch(
-                &mut self.real_buf,
-                &mut self.spectrum,
-                &mut self.scratch_r2c,
-            )
-            .expect("IBDWT reload real-to-complex FFT failed");
+        self.engine.forward(&mut self.real_buf, &mut self.spectrum, &mut self.scratch_fwd);
     }
 
     fn ibdwt_to_biguint(&self) -> BigUint {
         let mut tmp_spectrum = self.spectrum.clone();
         let mut tmp_real = vec![0.0f64; self.fft_size];
-        let mut scratch = self.scratch_c2r.clone();
-
-        self.c2r
-            .process_with_scratch(&mut tmp_spectrum, &mut tmp_real, &mut scratch)
-            .expect("IBDWT to_biguint complex-to-real IFFT failed");
+        let mut scratch = vec![Complex::new(0.0, 0.0); self.engine.inverse_scratch_len()];
+        self.engine.inverse(&mut tmp_spectrum, &mut tmp_real, &mut scratch);
 
         let inv_n = 1.0 / self.fft_size as f64;
         for j in 0..self.fft_size {
@@ -304,9 +231,6 @@ impl DwtSquarer {
     // -----------------------------------------------------------------------
 
     fn zeropad_square(&mut self) {
-        // Fill real_buf with 16-bit limbs directly from BigUint's internal u32
-        // words via iter_u32_digits().  Each u32 word is split into two
-        // entries (lo 16 bits, hi 16 bits). No byte Vec is allocated.
         self.real_buf.fill(0.0);
         let mut sig_idx = 0usize;
         for word in self.value.as_ref().unwrap().iter_u32_digits() {
@@ -319,25 +243,9 @@ impl DwtSquarer {
             sig_idx += 2;
         }
 
-        self.r2c
-            .process_with_scratch(
-                &mut self.real_buf,
-                &mut self.spectrum,
-                &mut self.scratch_r2c,
-            )
-            .expect("Zero-padded real-to-complex FFT failed");
-
-        for c in &mut self.spectrum {
-            *c = *c * *c;
-        }
-
-        self.c2r
-            .process_with_scratch(
-                &mut self.spectrum,
-                &mut self.real_buf,
-                &mut self.scratch_c2r,
-            )
-            .expect("Zero-padded complex-to-real IFFT failed");
+        self.engine.forward(&mut self.real_buf, &mut self.spectrum, &mut self.scratch_fwd);
+        for c in &mut self.spectrum { *c = *c * *c; }
+        self.engine.inverse(&mut self.spectrum, &mut self.real_buf, &mut self.scratch_inv);
 
         let inv_n = 1.0 / self.fft_size as f64;
         let base: i64 = 65536;
@@ -361,12 +269,7 @@ impl DwtSquarer {
             })
             .collect();
 
-        self.value = Some(kbn_reduce(
-            BigUint::new(words),
-            self.k,
-            self.exp,
-            &self.modulus,
-        ));
+        self.value = Some(kbn_reduce(BigUint::new(words), self.k, self.exp, &self.modulus));
     }
 }
 
@@ -375,39 +278,27 @@ impl DwtSquarer {
 // ---------------------------------------------------------------------------
 
 fn extract_bits(bytes: &[u8], start: u64, width: u64) -> u64 {
-    if width == 0 {
-        return 0;
-    }
+    if width == 0 { return 0; }
     let byte_start = (start / 8) as usize;
     let bit_off = start % 8;
     let mut val: u64 = 0;
     for i in 0..9usize {
         let idx = byte_start + i;
-        let b = if idx < bytes.len() {
-            bytes[idx] as u64
-        } else {
-            0
-        };
+        let b = if idx < bytes.len() { bytes[idx] as u64 } else { 0 };
         val |= b << (8 * i);
-        if 8 * (i as u64 + 1) >= bit_off + width {
-            break;
-        }
+        if 8 * (i as u64 + 1) >= bit_off + width { break; }
     }
     (val >> bit_off) & limb_mask_u64(width)
 }
 
 fn write_bits(bytes: &mut [u8], start: u64, width: u64, val: u64) {
-    if width == 0 {
-        return;
-    }
+    if width == 0 { return; }
     let byte_start = (start / 8) as usize;
     let bit_off = start % 8;
     let mut v = val << bit_off;
     let n = ((bit_off + width + 7) / 8) as usize;
     for i in 0..n {
-        if byte_start + i < bytes.len() {
-            bytes[byte_start + i] |= (v & 0xFF) as u8;
-        }
+        if byte_start + i < bytes.len() { bytes[byte_start + i] |= (v & 0xFF) as u8; }
         v >>= 8;
     }
 }
@@ -462,13 +353,8 @@ fn ibdwt_carry(a: &mut [i64], bit_pos: &[u64], len: usize) {
 fn limb_reduce(a: &mut [i64], m: &[i64], bit_pos: &[u64], len: usize) {
     let mut ge = true;
     for j in (0..len).rev() {
-        if a[j] > m[j] {
-            break;
-        }
-        if a[j] < m[j] {
-            ge = false;
-            break;
-        }
+        if a[j] > m[j] { break; }
+        if a[j] < m[j] { ge = false; break; }
     }
     if ge {
         let mut borrow: i64 = 0;
@@ -493,34 +379,17 @@ fn biguint_from_var_limbs(a: &[i64], bit_pos: &[u64], len: usize) -> BigUint {
     let total_bytes = (total_bits as usize + 7) / 8;
     let mut bytes = vec![0u8; total_bytes];
     for j in 0..len {
-        write_bits(
-            &mut bytes,
-            bit_pos[j],
-            bit_pos[j + 1] - bit_pos[j],
-            a[j] as u64,
-        );
+        write_bits(&mut bytes, bit_pos[j], bit_pos[j + 1] - bit_pos[j], a[j] as u64);
     }
-    while bytes.last() == Some(&0) {
-        bytes.pop();
-    }
-    if bytes.is_empty() {
-        BigUint::zero()
-    } else {
-        BigUint::from_bytes_le(&bytes)
-    }
+    while bytes.last() == Some(&0) { bytes.pop(); }
+    if bytes.is_empty() { BigUint::zero() } else { BigUint::from_bytes_le(&bytes) }
 }
 
 fn kbn_reduce(x: BigUint, k: u64, exp: u64, modulus: &BigUint) -> BigUint {
-    if x.is_zero() {
-        return x;
-    }
+    if x.is_zero() { return x; }
     let q = (&x >> exp as usize) / k;
     let r = x + &q - ((&q * k) << exp as usize);
-    if r >= *modulus {
-        r - modulus
-    } else {
-        r
-    }
+    if r >= *modulus { r - modulus } else { r }
 }
 
 #[cfg(test)]
@@ -578,10 +447,7 @@ mod tests {
     fn test_weights_unity_when_l_divides_exp() {
         let sq = DwtSquarer::new(1, 32, &BigUint::from(1u64));
         for (j, &w) in sq.fwd.iter().enumerate() {
-            assert!(
-                (w - 1.0).abs() < 1e-12,
-                "weight[{j}] = {w}, expected 1.0"
-            );
+            assert!((w - 1.0).abs() < 1e-12, "weight[{j}] = {w}, expected 1.0");
         }
     }
 
