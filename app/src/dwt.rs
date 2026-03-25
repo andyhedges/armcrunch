@@ -22,16 +22,17 @@ use rustfft::num_complex::Complex;
 use crate::fft_engine::{FftEngine, RealFftEngine};
 
 /// Select the best FFT engine for the current platform.
+/// Falls back to RealFftEngine for very small FFT sizes (< 4) since
+/// NeonFftEngine requires a minimum size of 4.
 fn make_engine(fft_size: usize) -> Box<dyn FftEngine> {
     #[cfg(target_arch = "aarch64")]
     {
-        use crate::neon_fft::NeonFftEngine;
-        Box::new(NeonFftEngine::new(fft_size))
+        if fft_size >= 4 {
+            use crate::neon_fft::NeonFftEngine;
+            return Box::new(NeonFftEngine::new(fft_size));
+        }
     }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        Box::new(RealFftEngine::new(fft_size))
-    }
+    Box::new(RealFftEngine::new(fft_size))
 }
 
 // ---------------------------------------------------------------------------

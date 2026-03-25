@@ -41,24 +41,26 @@ fn bit_reverse_permute(data: &mut [Complex<f64>], n: usize) {
 unsafe fn butterfly(a_ptr: *mut f64, b_ptr: *mut f64, w_re: f64, w_im: f64) {
     use std::arch::aarch64::*;
 
-    let va = vld1q_f64(a_ptr);
-    let vb = vld1q_f64(b_ptr);
+    unsafe {
+        let va = vld1q_f64(a_ptr);
+        let vb = vld1q_f64(b_ptr);
 
-    let vw_re = vdupq_n_f64(w_re);
-    let vw_im = vdupq_n_f64(w_im);
-    let vb_swap = vextq_f64(vb, vb, 1);
+        let vw_re = vdupq_n_f64(w_re);
+        let vw_im = vdupq_n_f64(w_im);
+        let vb_swap = vextq_f64(vb, vb, 1);
 
-    let prod1 = vmulq_f64(vw_re, vb);
-    let prod2 = vmulq_f64(vw_im, vb_swap);
+        let prod1 = vmulq_f64(vw_re, vb);
+        let prod2 = vmulq_f64(vw_im, vb_swap);
 
-    let negate = vsetq_lane_f64(-1.0, vdupq_n_f64(1.0), 0);
-    let wb = vfmaq_f64(prod1, negate, prod2);
+        let negate = vsetq_lane_f64(-1.0, vdupq_n_f64(1.0), 0);
+        let wb = vfmaq_f64(prod1, negate, prod2);
 
-    let a_out = vaddq_f64(va, wb);
-    let b_out = vsubq_f64(va, wb);
+        let a_out = vaddq_f64(va, wb);
+        let b_out = vsubq_f64(va, wb);
 
-    vst1q_f64(a_ptr, a_out);
-    vst1q_f64(b_ptr, b_out);
+        vst1q_f64(a_ptr, a_out);
+        vst1q_f64(b_ptr, b_out);
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]
