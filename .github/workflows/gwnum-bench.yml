@@ -17,13 +17,13 @@ jobs:
             gwnum_prebuilt: linux64/gwnum.a
             cc_flags: "-DX86_64 -std=gnu99"
             link_flags: "-lm -lpthread -lstdc++ -lgmp -static"
-          - os: macos-13
+          - os: macos-26-intel
             platform: macos-amd64
             gwnum_make: makemac
             gwnum_prebuilt: macosx64/gwnum.a
             cc_flags: "-DX86_64 -std=gnu99"
             link_flags: "-lm -lpthread -lstdc++ -lgmp"
-          - os: macos-14
+          - os: macos-26
             platform: macos-arm64
             gwnum_make: makemac
             gwnum_prebuilt: macosx64/gwnum.a
