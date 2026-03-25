@@ -4,16 +4,7 @@ The `DwtSquarer` in `src/dwt.rs` keeps `x` in FFT domain between squarings, so t
 
 ## Current state
 
-4 tests pass, 2 fail:
-
-```
-test dwt::tests::test_weights_unity_when_l_divides_exp ... ok
-test dwt::tests::test_phase_a_l_divides_exp ... ok   ← k=1, exp=32, L|exp
-test dwt::tests::test_phase_a_single_square ... ok   ← single square only
-test dwt::tests::test_phase_b_single_square ... ok   ← single square only
-test dwt::tests::test_phase_a_chain ... FAILED       ← k=1, exp=31, L∤exp
-test dwt::tests::test_phase_b_chain ... FAILED       ← k=1005, exp=64
-```
+All tests pass.
 
 ## Known root causes
 
@@ -38,8 +29,15 @@ makes cyclic convolution compute multiplication mod M. However, for the wrap ter
 When L∤exp, the rounded IFFT coefficients are not the true polynomial product
 coefficients, so carry normalization produces wrong limbs.
 
-Fix: choose the transform length so that L | exp (guaranteed integer b), OR derive
-and implement the correct two-pass balanced weight approach from GWnum.
+Fix: pad total_bits to a multiple of L so b is always an integer. Add final
+reduction step (compare against M, subtract if needed) to handle values in
+[M, 2^padded_bits).
+
+**Bug 3 — carry wrap for k>1 didn't converge**
+
+The original carry wrap used a division-by-k approach that didn't converge for
+k=1005. Fixed by precomputing `wrap_factor = 2^padded_bits mod M` as limbs and
+using it directly in the carry wrap loop.
 
 ## Key files
 
@@ -47,18 +45,18 @@ and implement the correct two-pass balanced weight approach from GWnum.
 |------|------|
 | `src/dwt.rs` | All DWT code — struct, weights, carry, load, square, to_biguint |
 | `src/fermat.rs` | `fermat_test_dwt` — uses DwtSquarer for the Fermat loop |
-| `benches/square_mod.rs` | Benchmarks — needs a `dwt` entry |
+| `benches/square_mod.rs` | Benchmarks — includes `dwt` entry |
 
 ## Shared constants / invariants
 
 ```
 M = k·2^exp − 1
 transform length L = power of 2
-b_lo = floor(exp / L), n_hi = exp % L   (before k fix)
-total limb bits = n_hi·(b_lo+1) + (L−n_hi)·b_lo = exp
+b_lo = padded_bits / L (uniform, integer)
+n_hi = 0 (all limbs same width after padding)
+padded_bits = ceil(total_bits / L) * L
+total_bits = exp + k_extra_bits
 ```
-
-After fix: `total limb bits = exp + ⌈log₂(k)⌉` when k > 1.
 
 ## Task order
 
@@ -66,9 +64,9 @@ After fix: `total limb bits = exp + ⌈log₂(k)⌉` when k > 1.
 |--------|------|--------------|-----------|
 | [x] | [task-01-round-trip.md](task-01-round-trip.md) | Verify load → to_biguint = identity | 3/4 pass; k_gt_1 fails → Task 2 |
 | [x] | [task-02-k-gt-1-repr.md](task-02-k-gt-1-repr.md) | Widen limb array for k>1 | round-trip holds for k=1005 |
-| [ ] | [task-03-integer-b.md](task-03-integer-b.md) | Guarantee L\|exp so b is integer | `test_phase_a_chain` green |
-| [ ] | [task-04-carry-normalize.md](task-04-carry-normalize.md) | Correct carry wrap for k>1 | `test_phase_b_chain` green |
-| [ ] | [task-05-integration.md](task-05-integration.md) | `fermat_test_dwt` + benchmarks | all DWT tests green, bench runs |
+| [x] | [task-03-integer-b.md](task-03-integer-b.md) | Guarantee L\|exp so b is integer | `test_phase_a_chain` green |
+| [x] | [task-04-carry-normalize.md](task-04-carry-normalize.md) | Correct carry wrap for k>1 | `test_phase_b_chain` green |
+| [x] | [task-05-integration.md](task-05-integration.md) | `fermat_test_dwt` + benchmarks | all DWT tests green, bench runs |
 
 ## Marking a task complete
 

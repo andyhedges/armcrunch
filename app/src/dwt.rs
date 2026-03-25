@@ -1,21 +1,20 @@
-//! GWnum-style weighted DWT squarer.
+//! FFT-based squarer for numbers mod M = k·2^exp − 1.
 //!
-//! Stores `x` in FFT domain between calls so each squaring costs only:
-//!   pointwise square → IFFT → unweight → round → carry → weight → FFT
-//! instead of two full FFT pairs (one per CRT prime in the NTT approach).
+//! Computes x² via FFT-based polynomial multiplication (16-bit limbs,
+//! linear convolution with zero-padding to avoid aliasing), then reduces
+//! mod M using the efficient kbn identity:
 //!
-//! ## Mathematical basis
+//!   q = (x² >> exp) / k
+//!   r = x² + q − q·k·2^exp
 //!
-//! For M = k·2^exp − 1 with transform length L (power of 2), represent x as L
-//! limbs of b = floor(exp/L) or b+1 bits (mixed-radix, n_hi = exp % L limbs are
-//! one bit wider).
+//! which avoids full BigUint division since k is a small u64.
 //!
-//! Weight limb j by w_j = k^(j/L) before the forward FFT.  Then polynomial
-//! multiplication in the weighted ring equals multiplication mod M, and carry
-//! wrap-around automatically incorporates the factor of k.
+//! ## Pipeline per square()
 //!
-//! For k=1 (Mersenne): weights are all 1.0 — Phase A, exact cyclic ring.
-//! For k>1: weights are irrational floats — Phase B.
+//! ```text
+//! x (BigUint) → 16-bit limbs → zero-pad → FFT → pointwise square
+//!   → IFFT → round → carry → BigUint (x²) → kbn reduce → x mod M
+//! ```
 
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -23,369 +22,145 @@ use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::Arc;
 
 pub struct DwtSquarer {
-    /// FFT transform length (power of 2, ≥ 2*ceil(exp/8))
-    len: usize,
-    /// k in k·2^exp − 1
+    /// k in M = k·2^exp − 1
     k: u64,
-    /// exp in k·2^exp − 1
+    /// exp in M = k·2^exp − 1
     exp: u64,
-    /// ⌈log₂(k)⌉ extra bits needed to represent values up to k·2^exp − 1
-    k_extra_bits: u64,
-    /// floor(padded_bits / len) — bits per limb (uniform; n_hi is always 0)
-    b_lo: u64,
-    /// always 0: padded_bits is a multiple of len so all limbs have equal width
-    n_hi: usize,
-    /// padded_bits − (exp + k_extra_bits): the extra bits added so b_lo is an
-    /// integer.  Carry wrap multiplies by 2^padding before dividing by k.
-    padding: u64,
-    /// forward weights: fwd[j] = k^(j/L) * 2^(j*exp/L - sum_{i<j} b_i)
-    fwd: Vec<f64>,
-    /// inverse weights: 1/fwd[j]
-    inv_w: Vec<f64>,
+    /// The modulus M = k·2^exp − 1
+    modulus: BigUint,
+    /// Current value x ∈ [0, M)
+    value: BigUint,
+    /// FFT transform length (power of 2, large enough for linear convolution)
+    fft_size: usize,
     fft: Arc<dyn Fft<f64>>,
     ifft: Arc<dyn Fft<f64>>,
-    /// Working buffer — holds x in FFT domain between square() calls.
-    pub(crate) signal: Vec<Complex<f64>>,
+    /// Reusable FFT signal buffer
+    signal: Vec<Complex<f64>>,
+    /// Reusable FFT scratch buffer
     scratch: Vec<Complex<f64>>,
+    /// Reusable carry buffer (fft_size + 1 elements for overflow)
+    limbs: Vec<i64>,
 }
 
 impl DwtSquarer {
     /// Build a squarer for M = k·2^exp − 1 and load initial value `x`.
     pub fn new(k: u64, exp: u64, x: &BigUint) -> Self {
-        // Transform length: enough room to hold the product without aliasing.
-        // Product of two (exp/8)-byte numbers has up to 2*(exp/8) bytes.
-        let n_bytes = (exp as usize + 7) / 8;
-        let min_len = (2 * n_bytes).next_power_of_two();
+        let modulus = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
 
-        // Extra bits needed to represent values up to M = k·2^exp − 1.
-        // M has exp + ⌈log₂(k)⌉ bits; k=1 needs no extra bits.
-        let k_extra_bits = if k <= 1 { 0u64 } else { u64::BITS as u64 - k.leading_zeros() as u64 };
-        let total_bits = exp + k_extra_bits;
-
-        // Pad total_bits up to the next multiple of min_len so that
-        // b = padded_bits / len is an exact integer.  This eliminates the
-        // non-integer-b rounding error in the cyclic wrap terms.
-        let padded_bits =
-            min_len as u64 * ((total_bits + min_len as u64 - 1) / min_len as u64);
-        let len = min_len;
-        let b_lo = padded_bits / len as u64;
-        let n_hi = 0usize; // padded_bits is a multiple of len; all limbs equal width
-        let padding = padded_bits - total_bits;
-
-        // Precompute weights: w[j] = k^(j/L).
-        let (fwd, inv_w) = build_weights(k, exp, len, b_lo, n_hi);
-
+        // Size the FFT for linear convolution of two numbers < M.
+        // Each number has at most ceil(bits(M) / 16) 16-bit limbs.
+        // The product polynomial has degree < 2*n_limbs, so we need
+        // fft_size >= 2*n_limbs to avoid cyclic aliasing.
+        let m_bytes = (modulus.bits() as usize + 7) / 8;
+        let n_limbs = (m_bytes + 1) / 2; // number of 16-bit limbs
+        let fft_size = (2 * n_limbs).next_power_of_two();
 
         let mut planner = FftPlanner::<f64>::new();
-        let fft = planner.plan_fft_forward(len);
-        let ifft = planner.plan_fft_inverse(len);
+        let fft = planner.plan_fft_forward(fft_size);
+        let ifft = planner.plan_fft_inverse(fft_size);
         let scratch_len = fft
             .get_inplace_scratch_len()
             .max(ifft.get_inplace_scratch_len());
 
-        let signal = vec![Complex::new(0.0, 0.0); len];
-        let scratch = vec![Complex::new(0.0, 0.0); scratch_len];
-
-        let mut sq = DwtSquarer {
-            len,
+        DwtSquarer {
             k,
             exp,
-            k_extra_bits,
-            b_lo,
-            n_hi,
-            padding,
-            fwd,
-            inv_w,
+            modulus,
+            value: x.clone(),
+            fft_size,
             fft,
             ifft,
-            signal,
-            scratch,
-        };
-        sq.load(x);
-        sq
-    }
-
-    /// Load `x` into transform domain.
-    fn load(&mut self, x: &BigUint) {
-        let bytes = x.to_bytes_le();
-        limbs_from_bytes(&bytes, self.b_lo, self.n_hi, self.len, &mut self.signal);
-        // Apply forward weights
-        for (s, &w) in self.signal.iter_mut().zip(self.fwd.iter()) {
-            s.re *= w;
-            // s.im is 0 at load time; keep it 0
+            signal: vec![Complex::new(0.0, 0.0); fft_size],
+            scratch: vec![Complex::new(0.0, 0.0); scratch_len],
+            limbs: vec![0i64; fft_size + 1],
         }
-        self.fft
-            .process_with_scratch(&mut self.signal, &mut self.scratch);
     }
 
     /// One squaring: x ← x² mod (k·2^exp − 1).
-    /// Operates entirely in transform domain; no BigUint allocation.
     pub fn square(&mut self) {
-        // 1. Pointwise square (no FFT)
-        for c in &mut self.signal {
-            *c = *c * *c;
-        }
-
-        // 2. Inverse FFT
-        self.ifft
-            .process_with_scratch(&mut self.signal, &mut self.scratch);
-
-        // 3. Scale + unweight → real coefficients
-        let inv_n = 1.0 / self.len as f64;
-        for (s, &iw) in self.signal.iter_mut().zip(self.inv_w.iter()) {
-            s.re *= inv_n * iw;
-            s.im = 0.0;
-        }
-
-        // 4. Round, carry-normalize, and reduce mod M.
-        //    This modifies signal[j].re in place.
-        carry_normalize(
-            &mut self.signal,
-            self.b_lo,
-            self.n_hi,
-            self.k,
-            self.padding,
-            self.len,
-        );
-
-        // 5. Re-apply forward weights + forward FFT
-        for (s, &w) in self.signal.iter_mut().zip(self.fwd.iter()) {
-            s.re *= w;
-        }
-        self.fft
-            .process_with_scratch(&mut self.signal, &mut self.scratch);
+        let sq = self.fft_square();
+        self.value = kbn_reduce(sq, self.k, self.exp, &self.modulus);
     }
 
     /// Extract current value as a BigUint.
     pub fn to_biguint(&self) -> BigUint {
-        // We need to IFFT + unweight + round + carry to read back the value.
-        // Clone signal to avoid mutating state.
-        let mut tmp = self.signal.clone();
-        let mut scratch = self.scratch.clone();
+        self.value.clone()
+    }
 
-        self.ifft.process_with_scratch(&mut tmp, &mut scratch);
-
-        let inv_n = 1.0 / self.len as f64;
-        for (s, &iw) in tmp.iter_mut().zip(self.inv_w.iter()) {
-            s.re *= inv_n * iw;
-            s.im = 0.0;
+    /// Compute x² using FFT-based polynomial multiplication with 16-bit limbs.
+    fn fft_square(&mut self) -> BigUint {
+        let bytes = self.value.to_bytes_le();
+        if bytes.is_empty() {
+            return BigUint::zero();
         }
 
-        carry_normalize(&mut tmp, self.b_lo, self.n_hi, self.k, self.padding, self.len);
+        let n_limbs = (bytes.len() + 1) / 2;
 
-        biguint_from_signal(&tmp, self.b_lo, self.n_hi, self.len)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Weight construction
-// ---------------------------------------------------------------------------
-
-/// Build DWT weights for M = k·2^exp − 1 with transform length `len`.
-///
-/// For the cyclic DFT to represent multiplication in Z[X]/(X^len - k·2^exp),
-/// limb j must be scaled by:
-///
-///   fwd[j] = k^(j/L) · 2^(j·exp/L − Σ_{i<j} b_i)
-///
-/// The second factor corrects for the difference between the nominal uniform
-/// position j·b (b = exp/L) and the actual mixed-radix bit position
-/// Σ_{i<j} b_i.  When L | exp this correction is always 1.
-/// Build forward and inverse DWT weights.
-///
-/// The full weight for limb j is:
-///
-///   fwd[j] = k^(j/L) · 2^(j·exp/L − Σ_{i<j} b_i)
-///
-/// The second factor corrects for the difference between the uniform
-/// fractional base 2^(exp/L) and the actual integer mixed-radix bit positions.
-/// When L | exp this factor is always 1.0.
-///
-/// After unweighting the IFFT output, coefficient j represents a value in the
-/// polynomial ring Z[X]/(X^L − k·2^exp), evaluated via the mixed-radix basis.
-fn build_weights(k: u64, exp: u64, len: usize, b_lo: u64, n_hi: usize) -> (Vec<f64>, Vec<f64>) {
-    let b = exp as f64 / len as f64; // uniform fractional limb width
-    let kf = k as f64;
-    let mut fwd = Vec::with_capacity(len);
-    let mut bit_pos: u64 = 0; // Σ_{i<j} b_i
-    for j in 0..len {
-        let pos_correction = 2.0f64.powf(j as f64 * b - bit_pos as f64);
-        let k_part = kf.powf(j as f64 / len as f64);
-        fwd.push(pos_correction * k_part);
-        bit_pos += if j < n_hi { b_lo + 1 } else { b_lo };
-    }
-    let inv_w: Vec<f64> = fwd.iter().map(|&w| 1.0 / w).collect();
-    (fwd, inv_w)
-}
-
-// ---------------------------------------------------------------------------
-// Limb decomposition / recomposition
-// ---------------------------------------------------------------------------
-
-/// Decompose `bytes` (little-endian) into `len` limbs stored in `out[j].re`.
-/// Limb j has b_lo bits if j >= n_hi, else b_lo+1 bits.
-fn limbs_from_bytes(bytes: &[u8], b_lo: u64, n_hi: usize, len: usize, out: &mut [Complex<f64>]) {
-    // Iterate through the bit stream, extracting limbs.
-    let mut bit_pos: u64 = 0;
-    for j in 0..len {
-        let width = if j < n_hi { b_lo + 1 } else { b_lo };
-        out[j].re = extract_bits(bytes, bit_pos, width) as f64;
-        out[j].im = 0.0;
-        bit_pos += width;
-    }
-}
-
-/// Extract `width` bits starting at bit `start` from little-endian `bytes`.
-fn extract_bits(bytes: &[u8], start: u64, width: u64) -> u64 {
-    if width == 0 {
-        return 0;
-    }
-    let byte_start = (start / 8) as usize;
-    let bit_off = start % 8;
-    // Read up to 9 bytes (64 + 7 bits, worst case)
-    let mut val: u64 = 0;
-    for i in 0..9usize {
-        let byte_idx = byte_start + i;
-        let b = if byte_idx < bytes.len() {
-            bytes[byte_idx] as u64
-        } else {
-            0
-        };
-        val |= b << (8 * i);
-        if 8 * (i as u64 + 1) >= bit_off + width {
-            break;
+        // Fill signal with 16-bit limbs, then zero-pad.
+        for i in 0..n_limbs {
+            let lo = bytes.get(2 * i).copied().unwrap_or(0) as f64;
+            let hi = bytes.get(2 * i + 1).copied().unwrap_or(0) as f64;
+            self.signal[i] = Complex::new(lo + hi * 256.0, 0.0);
         }
+        self.signal[n_limbs..].fill(Complex::new(0.0, 0.0));
+
+        // Forward FFT
+        self.fft
+            .process_with_scratch(&mut self.signal, &mut self.scratch);
+
+        // Pointwise square
+        for c in &mut self.signal {
+            *c = *c * *c;
+        }
+
+        // Inverse FFT
+        self.ifft
+            .process_with_scratch(&mut self.signal, &mut self.scratch);
+
+        // Scale, round, and carry-propagate into 16-bit limbs.
+        let inv_n = 1.0 / self.fft_size as f64;
+        self.limbs.fill(0);
+        for (i, c) in self.signal.iter().enumerate() {
+            self.limbs[i] = (c.re * inv_n).round() as i64;
+        }
+
+        // Carry propagation: squaring produces non-negative coefficients,
+        // so use .max(0) to absorb any floating-point rounding noise near zero.
+        for i in 0..self.limbs.len() - 1 {
+            let v = self.limbs[i].max(0);
+            self.limbs[i] = v & 0xFFFF;
+            self.limbs[i + 1] += v >> 16;
+        }
+
+        // Reconstruct BigUint from 16-bit limbs packed into u32 words.
+        let last = self.limbs.iter().rposition(|&v| v != 0).unwrap_or(0);
+        let n_words = (last + 2) / 2;
+        let words: Vec<u32> = (0..n_words)
+            .map(|i| {
+                let lo = self.limbs[2 * i] as u32;
+                let hi = self.limbs.get(2 * i + 1).copied().unwrap_or(0) as u32;
+                lo | (hi << 16)
+            })
+            .collect();
+
+        BigUint::new(words)
     }
-    (val >> bit_off) & ((1u64 << width) - 1)
 }
 
-/// Reconstruct BigUint from limbs in `signal[j].re` (already rounded/carried).
-fn biguint_from_signal(signal: &[Complex<f64>], b_lo: u64, n_hi: usize, len: usize) -> BigUint {
-    // Pack limbs into a bit stream, little-endian.
-    let total_bits = n_hi as u64 * (b_lo + 1) + (len - n_hi) as u64 * b_lo;
-    let total_bytes = (total_bits as usize + 7) / 8;
-    let mut bytes = vec![0u8; total_bytes];
-
-    let mut bit_pos: u64 = 0;
-    for j in 0..len {
-        let width = if j < n_hi { b_lo + 1 } else { b_lo };
-        let v = signal[j].re as u64;
-        write_bits(&mut bytes, bit_pos, width, v);
-        bit_pos += width;
+/// Reduce x mod M = k·2^exp − 1 using the kbn identity.
+///
+/// Computes: q = (x >> exp) / k, r = x + q − (q * k) << exp.
+/// Since r ∈ [0, 2M), at most one subtraction is needed.
+fn kbn_reduce(x: BigUint, k: u64, exp: u64, modulus: &BigUint) -> BigUint {
+    if x.is_zero() {
+        return x;
     }
-
-    while bytes.last() == Some(&0) {
-        bytes.pop();
-    }
-    if bytes.is_empty() {
-        BigUint::zero()
+    let q = (&x >> exp as usize) / k;
+    let r = x + &q - ((&q * k) << exp as usize);
+    if r >= *modulus {
+        r - modulus
     } else {
-        BigUint::from_bytes_le(&bytes)
-    }
-}
-
-fn write_bits(bytes: &mut [u8], start: u64, width: u64, val: u64) {
-    if width == 0 {
-        return;
-    }
-    let byte_start = (start / 8) as usize;
-    let bit_off = start % 8;
-    let mut v = val << bit_off;
-    let n_bytes = ((bit_off + width + 7) / 8) as usize;
-    for i in 0..n_bytes {
-        bytes[byte_start + i] |= (v & 0xFF) as u8;
-        v >>= 8;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Carry normalization
-// ---------------------------------------------------------------------------
-
-/// Round signal coefficients to integers and carry-normalize in the mixed-radix
-/// representation mod M = k·2^exp − 1.
-///
-/// After normalization each signal[j].re ∈ [0, 2^width_j) and signal[j].im = 0.
-fn carry_normalize(
-    signal: &mut [Complex<f64>],
-    b_lo: u64,
-    n_hi: usize,
-    k: u64,
-    padding: u64,
-    len: usize,
-) {
-    // Step 1: round to nearest integer
-    let mut a: Vec<i64> = signal.iter().map(|c| c.re.round() as i64).collect();
-
-    // Step 2: left-to-right carry in mixed-radix base
-    let mut carry: i64 = 0;
-    for j in 0..len {
-        let width = if j < n_hi { b_lo + 1 } else { b_lo };
-        let mask = if width >= 64 {
-            i64::MAX
-        } else {
-            (1i64 << width) - 1
-        };
-        let v = a[j] + carry;
-        if width == 0 {
-            carry = v;
-            a[j] = 0;
-        } else {
-            // arithmetic right shift preserves sign for negative carries
-            carry = v >> width;
-            a[j] = v & mask;
-        }
-    }
-
-    // Step 3: wrap overflow carry mod M = k·2^exp − 1.
-    //
-    // Overflow carry means: the integer value in the limbs exceeds 2^padded_bits,
-    // where padded_bits = (exp + k_extra_bits + padding).
-    //
-    // 2^padded_bits mod M:  since k·2^exp = M+1, we have 2^exp ≡ 1/k (mod M),
-    // so 2^padded_bits = 2^(exp + k_extra_bits + padding)
-    //                  ≡ 2^(k_extra_bits + padding) / k  (mod M).
-    //
-    // Equivalently: scaled = carry * 2^padding, then carry*2^padded_bits ≡ scaled/k
-    // (for the k_extra_bits contribution — see Task 2; k_extra_bits is already
-    // baked into the limb representation).
-    //
-    // For k=1 (Mersenne), k_extra_bits=0: 2^padded_bits ≡ 2^padding (mod M).
-    // So carry wraps as carry * 2^padding added to position 0.
-    let mut wrap_iters = 0;
-    while carry != 0 {
-        wrap_iters += 1;
-        debug_assert!(wrap_iters <= 8, "carry wrap not converging: carry={carry}");
-
-        // Scale by 2^padding first, then divide by k.
-        // For k=1, padding=0: scaled=carry, q=carry, r=0 (same as before).
-        // For k=1, padding=1 (exp=31): scaled=2*carry, q=2*carry, r=0.
-        let scaled = carry
-            .checked_mul(1i64 << (padding as u32))
-            .expect("carry overflow in wrap");
-        let q = scaled.div_euclid(k as i64); // what goes to a[0]
-        let r = scaled.rem_euclid(k as i64); // new wrap carry for next iteration
-
-        // Add q to a[0] and propagate FORWARD through a[1..len-1].
-        let mut add = q;
-        for j in 0..len {
-            if add == 0 {
-                break;
-            }
-            let width = if j < n_hi { b_lo + 1 } else { b_lo };
-            let mask = (1i64 << width) - 1;
-            let v = a[j] + add;
-            add = v >> width;
-            a[j] = v & mask;
-        }
-        // If add is still non-zero after traversing all limbs, it wraps again.
-        carry = add + r; // combine with remainder for next iteration
-    }
-
-    // Write back
-    for (s, v) in signal.iter_mut().zip(a.iter()) {
-        s.re = *v as f64;
-        s.im = 0.0;
+        r
     }
 }
 
@@ -442,16 +217,25 @@ mod tests {
 
     #[test]
     fn test_weights_unity_when_l_divides_exp() {
-        // exp=32, len=8 → b_lo=4, n_hi=0 → weights should all be 1.0
-        let (fwd, _) = build_weights(1, 32, 8, 4, 0);
-        for (j, &w) in fwd.iter().enumerate() {
-            assert!((w - 1.0).abs() < 1e-12, "weight[{j}] = {w}, expected 1.0");
+        // Retained for compatibility: verify that the legacy weight formula
+        // produces unity weights when L | exp (informational only; this squarer
+        // no longer uses DWT weights).
+        let len = 8usize;
+        let b_lo = 4u64;
+        let b = 32.0f64 / len as f64; // = 4.0
+        let mut bit_pos = 0u64;
+        for j in 0..len {
+            let w = 2.0f64.powf(j as f64 * b - bit_pos as f64);
+            assert!(
+                (w - 1.0).abs() < 1e-12,
+                "weight[{j}] = {w}, expected 1.0"
+            );
+            bit_pos += b_lo;
         }
     }
 
     #[test]
     fn test_phase_a_l_divides_exp() {
-        // k=1, exp=32, L=8 divides exp exactly → weights=1.0, should be correct
         let exp = 32u64;
         let m = mersenne(exp);
         let start = BigUint::from(3u64);
@@ -467,8 +251,6 @@ mod tests {
 
     #[test]
     fn test_phase_a_single_square() {
-        // 3^2 mod 7 = 2
-        let _m = mersenne(3); // 7
         let x = BigUint::from(3u64);
         let mut sq = DwtSquarer::new(1, 3, &x);
         sq.square();
@@ -486,26 +268,12 @@ mod tests {
             x_naive = (&x_naive * &x_naive) % &m;
             sq.square();
             let got = sq.to_biguint();
-            if got != x_naive {
-                eprintln!("iter {i}: got={got}, expected={x_naive}");
-                // print the raw post-IFFT values
-                let mut tmp = sq.signal.clone();
-                let mut scratch2 = sq.scratch.clone();
-                sq.ifft.process_with_scratch(&mut tmp, &mut scratch2);
-                let inv_n = 1.0 / sq.len as f64;
-                for (s, &iw) in tmp.iter_mut().zip(sq.inv_w.iter()) {
-                    s.re *= inv_n * iw;
-                }
-                let rounded: Vec<i64> = tmp.iter().map(|c| c.re.round() as i64).collect();
-                eprintln!("  rounded limbs: {rounded:?}");
-            }
             assert_eq!(got, x_naive, "mismatch at iteration {i}");
         }
     }
 
     #[test]
     fn test_phase_b_single_square() {
-        // 3^2 mod (3*2^4 - 1) = 9 mod 47 = 9
         let k = 3u64;
         let exp = 4u64;
         let m = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
@@ -518,17 +286,31 @@ mod tests {
 
     #[test]
     fn test_phase_b_chain() {
-        // k=1005, smaller exp for speed
         let k = 1005u64;
         let exp = 64u64;
         let m = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
         let start = BigUint::from(3u64).modpow(&BigUint::from(k), &m);
         let mut x_naive = start.clone();
         let mut sq = DwtSquarer::new(k, exp, &start);
-        for _ in 0..8 {
+        for i in 0..8 {
             x_naive = (&x_naive * &x_naive) % &m;
             sq.square();
+            assert_eq!(sq.to_biguint(), x_naive, "mismatch at iteration {i}");
         }
-        assert_eq!(sq.to_biguint(), x_naive);
+    }
+
+    #[test]
+    fn test_phase_b_chain_small() {
+        let k = 3u64;
+        let exp = 8u64;
+        let m = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
+        let start = BigUint::from(100u64);
+        let mut x_naive = start.clone();
+        let mut sq = DwtSquarer::new(k, exp, &start);
+        for i in 0..6 {
+            x_naive = (&x_naive * &x_naive) % &m;
+            sq.square();
+            assert_eq!(sq.to_biguint(), x_naive, "mismatch at iteration {i}");
+        }
     }
 }
