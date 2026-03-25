@@ -1,13 +1,13 @@
 //! Fermat test benchmark for 1003*2^2499999-1.
 //!
-//! Runs each viable squaring method (fft, dwt, kbn) for a fixed duration
-//! (default 120s), counts iterations completed, and projects total runtime
-//! for a full Fermat test.  Verifies all methods produce identical results.
+//! Runs a configurable number of squaring iterations with each viable method
+//! (fft, dwt, kbn), verifies they produce identical results, and projects
+//! total runtime for a full Fermat test.
 
 use armcrunch::{fermat_test, fermat_test_dwt, Kbn, FftSquarer, DwtSquarer};
 use num_bigint::BigUint;
 use num_traits::One;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const K: u64 = 1003;
 const N: u64 = 2_499_999;
@@ -16,24 +16,22 @@ const BASE: u64 = 3;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut duration_secs: u64 = 120;
+    let mut iters: u64 = 100;
     let mut full_method: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--duration" => {
+            "--iters" => {
                 i += 1;
-                duration_secs = args.get(i).expect("--duration requires seconds")
-                    .parse().expect("--duration requires a number");
+                iters = args.get(i).expect("--iters requires a number")
+                    .parse().expect("--iters requires a number");
             }
             "--full" => {
                 i += 1;
                 full_method = Some(args.get(i).expect("--full requires a method name").clone());
             }
             _ => {
-                eprintln!("Usage: fermat_bench [--duration SECS] [--full fft|dwt]");
-                eprintln!("  --duration SECS  Time limit per method (default: 120)");
-                eprintln!("  --full METHOD    Run a complete Fermat test (fft or dwt)");
+                eprintln!("Usage: fermat_bench [--iters N] [--full fft|dwt]");
                 std::process::exit(1);
             }
         }
@@ -48,149 +46,99 @@ fn main() {
     if let Some(method) = full_method {
         run_full_test(&kbn, &method);
     } else {
-        run_timed_comparison(&kbn, Duration::from_secs(duration_secs));
+        run_comparison(&kbn, iters);
     }
 }
 
-fn format_duration(secs: f64) -> String {
-    if secs < 60.0 {
-        format!("{:.1}s", secs)
-    } else if secs < 3600.0 {
-        format!("{:.1}m", secs / 60.0)
-    } else if secs < 86400.0 {
-        format!("{:.1}h", secs / 3600.0)
-    } else {
-        format!("{:.1}d", secs / 86400.0)
+struct MethodResult {
+    name: &'static str,
+    value: BigUint,
+    elapsed_secs: f64,
+    iters: u64,
+}
+
+impl MethodResult {
+    fn ms_per_iter(&self) -> f64 {
+        self.elapsed_secs * 1000.0 / self.iters as f64
+    }
+
+    fn projected_hours(&self) -> f64 {
+        (self.ms_per_iter() / 1000.0) * N as f64 / 3600.0
+    }
+
+    fn res64(&self) -> u64 {
+        self.value.iter_u64_digits().next().unwrap_or(0)
     }
 }
 
-fn run_timed_comparison(kbn: &Kbn, time_limit: Duration) {
+fn run_comparison(kbn: &Kbn, iters: u64) {
     let modulus = kbn.value();
     let a_big = BigUint::from(BASE);
 
     println!("Computing a^k mod M (k={})...", K);
     let t0 = Instant::now();
     let x0 = a_big.modpow(&BigUint::from(K), &modulus);
-    println!("  done in {:.1}s\n", t0.elapsed().as_secs_f64());
+    println!("  done in {:.2}s\n", t0.elapsed().as_secs_f64());
 
-    println!("Running each method for up to {} seconds:\n", time_limit.as_secs());
+    println!("Running {} squaring iterations with each method:\n", iters);
 
-    // Phase 1: timed runs to measure throughput
-    struct TimingResult {
-        name: &'static str,
-        elapsed: Duration,
-        iters: u64,
-    }
+    let mut results: Vec<MethodResult> = Vec::new();
 
-    let mut timings: Vec<TimingResult> = Vec::new();
-
-    // --- fft ---
+    // --- FftSquarer (fft) ---
     {
-        eprint!("  Timing fft...");
         let mut x = x0.clone();
         let mut squarer = FftSquarer::new(&modulus);
-        let start = Instant::now();
-        let mut count: u64 = 0;
-        while start.elapsed() < time_limit {
+        let t = Instant::now();
+        for _ in 0..iters {
             squarer.square_kbn(&mut x, K, N, &modulus);
-            count += 1;
         }
-        let elapsed = start.elapsed();
-        eprintln!("\r  fft:  {} iters in {:.1}s    ", count, elapsed.as_secs_f64());
-        timings.push(TimingResult { name: "fft", elapsed, iters: count });
+        let elapsed = t.elapsed().as_secs_f64();
+        results.push(MethodResult { name: "fft", value: x, elapsed_secs: elapsed, iters });
     }
 
-    // --- dwt ---
+    // --- DwtSquarer (dwt) ---
     {
-        eprint!("  Timing dwt...");
         let mut squarer = DwtSquarer::new(K, N, &x0);
-        let start = Instant::now();
-        let mut count: u64 = 0;
-        while start.elapsed() < time_limit {
+        let t = Instant::now();
+        for _ in 0..iters {
             squarer.square();
-            count += 1;
         }
-        let elapsed = start.elapsed();
-        eprintln!("\r  dwt:  {} iters in {:.1}s    ", count, elapsed.as_secs_f64());
-        timings.push(TimingResult { name: "dwt", elapsed, iters: count });
+        let elapsed = t.elapsed().as_secs_f64();
+        let x = squarer.to_biguint();
+        results.push(MethodResult { name: "dwt", value: x, elapsed_secs: elapsed, iters });
     }
 
-    // --- kbn ---
+    // --- kbn (BigUint multiply + kbn reduce) ---
     {
-        eprint!("  Timing kbn...");
         let mut x = x0.clone();
-        let start = Instant::now();
-        let mut count: u64 = 0;
-        while start.elapsed() < time_limit {
+        let t = Instant::now();
+        for _ in 0..iters {
             armcrunch::square_mod_kbn(&mut x, K, N, &modulus);
-            count += 1;
         }
-        let elapsed = start.elapsed();
-        eprintln!("\r  kbn:  {} iters in {:.1}s    ", count, elapsed.as_secs_f64());
-        timings.push(TimingResult { name: "kbn", elapsed, iters: count });
+        let elapsed = t.elapsed().as_secs_f64();
+        results.push(MethodResult { name: "kbn", value: x, elapsed_secs: elapsed, iters });
     }
 
-    // Print results table
+    // Print results
+    for r in &results {
+        println!("  {:4}: {:.3}s for {} iters ({:.3} ms/iter), projected: {:.1} hours, RES64: {:016X}",
+            r.name, r.elapsed_secs, r.iters, r.ms_per_iter(), r.projected_hours(), r.res64());
+    }
+
+    // Verify all methods agree
     println!();
-    println!("  {:<8} {:>10} {:>12} {:>12} {:>14}",
-        "Method", "Iters", "Wall time", "ms/iter", "Projected");
-    println!("  {:-<8} {:-<10} {:-<12} {:-<12} {:-<14}", "", "", "", "", "");
-    for t in &timings {
-        let ms_per = t.elapsed.as_secs_f64() * 1000.0 / t.iters as f64;
-        let projected_secs = (ms_per / 1000.0) * N as f64;
-        println!("  {:<8} {:>10} {:>12} {:>12.3} {:>14}",
-            t.name,
-            t.iters,
-            format_duration(t.elapsed.as_secs_f64()),
-            ms_per,
-            format_duration(projected_secs));
-    }
-
-    // Phase 2: verify correctness by replaying min(iters) with each method
-    // and comparing full BigUint results.
-    let min_iters = timings.iter().map(|t| t.iters).min().unwrap();
-    println!("\nVerifying all methods agree after {} iterations...", min_iters);
-
-    let mut verify_values: Vec<(&str, BigUint)> = Vec::new();
-
-    {
-        let mut x = x0.clone();
-        let mut squarer = FftSquarer::new(&modulus);
-        for _ in 0..min_iters {
-            squarer.square_kbn(&mut x, K, N, &modulus);
-        }
-        verify_values.push(("fft", x));
-    }
-    {
-        let mut squarer = DwtSquarer::new(K, N, &x0);
-        for _ in 0..min_iters {
-            squarer.square();
-        }
-        verify_values.push(("dwt", squarer.to_biguint()));
-    }
-    {
-        let mut x = x0.clone();
-        for _ in 0..min_iters {
-            armcrunch::square_mod_kbn(&mut x, K, N, &modulus);
-        }
-        verify_values.push(("kbn", x));
-    }
-
     let mut all_agree = true;
-    for i in 1..verify_values.len() {
-        if verify_values[i].1 != verify_values[0].1 {
-            eprintln!("ERROR: '{}' disagrees with '{}' after {} iterations!",
-                verify_values[i].0, verify_values[0].0, min_iters);
-            eprintln!("  {} RES64: {:016X}", verify_values[0].0,
-                verify_values[0].1.iter_u64_digits().next().unwrap_or(0));
-            eprintln!("  {} RES64: {:016X}", verify_values[i].0,
-                verify_values[i].1.iter_u64_digits().next().unwrap_or(0));
+    for i in 1..results.len() {
+        if results[i].value != results[0].value {
+            eprintln!("ERROR: method '{}' disagrees with '{}' after {} iterations!",
+                results[i].name, results[0].name, iters);
+            eprintln!("  {} RES64: {:016X}", results[0].name, results[0].res64());
+            eprintln!("  {} RES64: {:016X}", results[i].name, results[i].res64());
             all_agree = false;
         }
     }
-
     if all_agree {
-        println!("  All {} methods agree.", verify_values.len());
+        println!("All {} methods agree on the result after {} iterations.", results.len(), iters);
     } else {
         eprintln!("\nFATAL: Method disagreement detected!");
         std::process::exit(1);
