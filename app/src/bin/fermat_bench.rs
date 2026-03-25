@@ -1,8 +1,11 @@
 //! Fermat test benchmark for 1003*2^2499999-1.
 //!
-//! Runs a configurable number of squaring iterations with each viable method
-//! (fft, dwt, kbn), verifies they produce identical results, and projects
-//! total runtime for a full Fermat test.
+//! Runs each viable squaring method (fft, dwt, kbn) for a configurable duration
+//! (default 120s), counts iterations completed, verifies all methods produce
+//! identical results, and projects total runtime for a full Fermat test.
+//!
+//! If pre-built gwnum_bench binaries are found in bench/, they are also run
+//! as a performance reference target.
 
 use armcrunch::{fermat_test, fermat_test_dwt, Kbn, FftSquarer, DwtSquarer};
 use num_bigint::BigUint;
@@ -64,6 +67,89 @@ fn format_duration(secs: f64) -> String {
     }
 }
 
+/// Try to run a gwnum_bench binary and parse the GWNUM_RESULT line.
+/// Returns Some((label, ms_per_iter)) on success, None if binary not found or failed.
+fn run_gwnum_bench(path: &std::path::Path, label: &str, iters: u32) -> Option<(String, f64)> {
+    if !path.exists() {
+        return None;
+    }
+
+    eprint!("  Running {}...", label);
+    let output = std::process::Command::new(path)
+        .args(["--k", &K.to_string(), "--n", &N.to_string(), "--iters", &iters.to_string()])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        eprintln!("\r  {}: failed (exit code {:?})    ", label, output.status.code());
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("GWNUM_RESULT ") {
+            if let Ok(ms) = rest.trim().parse::<f64>() {
+                eprintln!("\r  {}: {:.3} ms/iter    ", label, ms);
+                return Some((label.to_string(), ms));
+            }
+        }
+    }
+
+    eprintln!("\r  {}: could not parse result    ", label);
+    None
+}
+
+/// Find and run any available gwnum_bench binaries.
+/// Returns a vec of (label, ms_per_iter) for each successful run.
+fn find_and_run_gwnum(iters: u32) -> Vec<(String, f64)> {
+    let mut results = Vec::new();
+
+    // Search paths: bench/ relative to the binary, or current directory
+    let search_dirs: Vec<std::path::PathBuf> = {
+        let mut dirs = Vec::new();
+        // Relative to the running binary
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                dirs.push(parent.join("../../bench"));
+                dirs.push(parent.join("../bench"));
+            }
+        }
+        // Relative to current working directory
+        dirs.push(std::path::PathBuf::from("bench"));
+        dirs.push(std::path::PathBuf::from("."));
+        dirs
+    };
+
+    // Binary names to look for, in display order
+    let binaries = [
+        ("gwnum_bench-linux-amd64", "gwnum-x86"),
+        ("gwnum_bench-macos-amd64", "gwnum-x86"),
+        ("gwnum_bench-macos-arm64", "gwnum-arm"),
+        ("gwnum_bench", "gwnum"),
+    ];
+
+    let mut found_labels = std::collections::HashSet::new();
+
+    for (binary_name, label) in &binaries {
+        for dir in &search_dirs {
+            let path = dir.join(binary_name);
+            if path.exists() && !found_labels.contains(*label) {
+                if let Some(result) = run_gwnum_bench(&path, label, iters) {
+                    found_labels.insert(result.0.clone());
+                    results.push(result);
+                }
+                break; // Don't search other dirs for same binary
+            }
+        }
+    }
+
+    if results.is_empty() {
+        eprintln!("  gwnum: not found (run bench/download_gwnum.sh to fetch pre-built binaries)");
+    }
+
+    results
+}
+
 fn run_timed_comparison(kbn: &Kbn, time_limit: Duration) {
     let modulus = kbn.value();
     let a_big = BigUint::from(BASE);
@@ -73,7 +159,11 @@ fn run_timed_comparison(kbn: &Kbn, time_limit: Duration) {
     let x0 = a_big.modpow(&BigUint::from(K), &modulus);
     println!("  done in {:.1}s\n", t0.elapsed().as_secs_f64());
 
-    println!("Running each method for up to {} seconds:\n", time_limit.as_secs());
+    // Run gwnum benchmarks first (if available)
+    println!("Checking for gwnum reference binaries:\n");
+    let gwnum_results = find_and_run_gwnum(1000);
+
+    println!("\nRunning each method for up to {} seconds:\n", time_limit.as_secs());
 
     struct TimingResult {
         name: &'static str,
@@ -129,15 +219,24 @@ fn run_timed_comparison(kbn: &Kbn, time_limit: Duration) {
         timings.push(TimingResult { name: "kbn", elapsed, iters: count });
     }
 
-    // Print results table
+    // Print combined results table
     println!();
-    println!("  {:<8} {:>10} {:>12} {:>12} {:>14}",
+    println!("  {:<12} {:>10} {:>12} {:>12} {:>14}",
         "Method", "Iters", "Wall time", "ms/iter", "Projected");
-    println!("  {:-<8} {:-<10} {:-<12} {:-<12} {:-<14}", "", "", "", "", "");
+    println!("  {:-<12} {:-<10} {:-<12} {:-<12} {:-<14}", "", "", "", "", "");
+
+    // gwnum results first (reference targets)
+    for (label, ms_per) in &gwnum_results {
+        let projected_secs = (ms_per / 1000.0) * N as f64;
+        println!("  {:<12} {:>10} {:>12} {:>12.3} {:>14}",
+            label, "1000", "-", ms_per, format_duration(projected_secs));
+    }
+
+    // Rust method results
     for t in &timings {
         let ms_per = t.elapsed.as_secs_f64() * 1000.0 / t.iters as f64;
         let projected_secs = (ms_per / 1000.0) * N as f64;
-        println!("  {:<8} {:>10} {:>12} {:>12.3} {:>14}",
+        println!("  {:<12} {:>10} {:>12} {:>12.3} {:>14}",
             t.name,
             t.iters,
             format_duration(t.elapsed.as_secs_f64()),
