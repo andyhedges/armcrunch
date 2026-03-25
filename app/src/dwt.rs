@@ -8,17 +8,12 @@
 //! and kbn reduction, since the IBDWT ring structure does not directly extend
 //! to k>1 without balanced-representation carry arithmetic.
 //!
-//! ## IBDWT (k=1) — Crandall & Fagin, 1994
+//! ## Hot-loop allocation avoidance
 //!
-//! Represent x in variable-base form: x = Σ x_j · 2^{⌈exp·j/N⌉}.
-//! Weight signal: a_j = 2^{⌈exp·j/N⌉ − exp·j/N}.
-//! The weighted cyclic convolution computes x² mod (2^exp − 1) directly.
-//! FFT length = N (number of limbs), not 2N.
-//!
-//! ## Zero-padded FFT (k>1)
-//!
-//! Standard FFT-based squaring with 16-bit limbs and 2× zero-padding.
-//! Reduction via kbn identity: q = (x² >> exp) / k, r = x² + q − q·k·2^exp.
+//! The square() method avoids per-iteration heap allocation:
+//! - IBDWT: reloads signal from a reusable limb buffer (no BigUint round-trip).
+//! - Zero-padded: fills signal from BigUint::iter_u32_digits() (no byte Vec).
+//! - All FFT scratch buffers, limb arrays, and signal vectors are pre-allocated.
 
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -29,99 +24,73 @@ use std::sync::Arc;
 // Shift-safe helpers
 // ---------------------------------------------------------------------------
 
-/// Bitmask of `width` ones as u64.  Safe for width >= 64.
 #[inline]
 fn limb_mask_u64(width: u64) -> u64 {
     if width >= 64 { u64::MAX } else if width == 0 { 0 } else { (1u64 << width) - 1 }
 }
 
-/// Bitmask of `width` ones as i64.  Safe for width >= 63.
 #[inline]
 fn limb_mask_i64(width: u64) -> i64 {
     if width >= 63 { i64::MAX } else if width == 0 { 0 } else { (1i64 << width) - 1 }
 }
 
-/// Arithmetic right-shift, safe for width >= 64.
 #[inline]
 fn arith_shr(val: i64, width: u64) -> i64 {
     if width >= 64 { if val >= 0 { 0 } else { -1 } } else { val >> width }
 }
 
-/// Internal strategy tag: which squaring algorithm to use.
-enum Strategy {
-    /// k=1: IBDWT with half-size FFT and weighted cyclic convolution.
-    Ibdwt {
-        /// Bit positions: bit_pos[j] = ⌈exp·j/len⌉, length len+1
-        bit_pos: Vec<u64>,
-        /// Forward weights
-        fwd: Vec<f64>,
-        /// Inverse weights
-        inv_w: Vec<f64>,
-    },
-    /// k>1: zero-padded FFT with 16-bit limbs and kbn reduction.
-    ZeroPadded {
-        k: u64,
-        exp: u64,
-        /// Carry buffer (fft_size + 1 elements)
-        limbs: Vec<i64>,
-    },
-}
+#[derive(Clone, Copy, PartialEq)]
+enum Mode { Ibdwt, ZeroPadded }
 
 pub struct DwtSquarer {
-    /// The modulus M = k·2^exp − 1
+    mode: Mode,
     modulus: BigUint,
-    /// FFT transform length (power of 2)
+    k: u64,
+    exp: u64,
     fft_size: usize,
     fft: Arc<dyn Fft<f64>>,
     ifft: Arc<dyn Fft<f64>>,
     signal: Vec<Complex<f64>>,
     scratch: Vec<Complex<f64>>,
-    /// Current value for ZeroPadded path (None for IBDWT)
+
+    // IBDWT fields (empty Vecs for ZeroPadded)
+    bit_pos: Vec<u64>,
+    fwd: Vec<f64>,
+    inv_w: Vec<f64>,
+    m_limbs: Vec<i64>,
+    ibdwt_limbs: Vec<i64>,
+
+    // Zero-padded fields
     value: Option<BigUint>,
-    strategy: Strategy,
+    zp_limbs: Vec<i64>,
 }
 
 impl DwtSquarer {
-    /// Build a squarer for M = k·2^exp − 1 and load initial value `x`.
     pub fn new(k: u64, exp: u64, x: &BigUint) -> Self {
         let modulus = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
-
-        if k == 1 {
-            Self::new_ibdwt(exp, &modulus, x)
-        } else {
-            Self::new_zero_padded(k, exp, &modulus, x)
-        }
+        if k == 1 { Self::new_ibdwt(k, exp, &modulus, x) }
+        else { Self::new_zero_padded(k, exp, &modulus, x) }
     }
 
-    /// IBDWT constructor for k=1 (Mersenne numbers).
-    fn new_ibdwt(exp: u64, modulus: &BigUint, x: &BigUint) -> Self {
-        // Choose FFT length so max limb width satisfies f64 precision:
-        // N · (2^b_max)² < 2^53  ⟹  b_max < (53 − log₂(N)) / 2
+    fn new_ibdwt(k: u64, exp: u64, modulus: &BigUint, x: &BigUint) -> Self {
         let fft_size = {
             let mut n = 4usize;
             loop {
                 let b_max = ((exp as usize + n - 1) / n) as f64;
                 let headroom = (53.0 - (n as f64).log2()) / 2.0;
-                if b_max <= headroom && n.is_power_of_two() {
-                    break n;
-                }
+                if b_max <= headroom && n.is_power_of_two() { break n; }
                 n *= 2;
                 assert!(n <= (1 << 28), "FFT length overflow");
             }
         };
 
-        // bit_pos[j] = ceil(exp * j / N)
         let mut bit_pos = Vec::with_capacity(fft_size + 1);
         for j in 0..=fft_size {
-            let bp = if j == 0 {
-                0u64
-            } else {
-                ((exp as u128 * j as u128 + fft_size as u128 - 1) / fft_size as u128) as u64
-            };
+            let bp = if j == 0 { 0u64 }
+            else { ((exp as u128 * j as u128 + fft_size as u128 - 1) / fft_size as u128) as u64 };
             bit_pos.push(bp);
         }
 
-        // Weights: a[j] = 2^(bit_pos[j] - exp*j/N)
         let len_f = fft_size as f64;
         let exp_f = exp as f64;
         let mut fwd = Vec::with_capacity(fft_size);
@@ -132,26 +101,30 @@ impl DwtSquarer {
             inv_w.push(1.0 / w);
         }
 
+        let m_bytes = modulus.to_bytes_le();
+        let mut m_limbs = vec![0i64; fft_size];
+        for j in 0..fft_size {
+            m_limbs[j] = extract_bits(&m_bytes, bit_pos[j], bit_pos[j + 1] - bit_pos[j]) as i64;
+        }
+
         let mut planner = FftPlanner::<f64>::new();
         let fft = planner.plan_fft_forward(fft_size);
         let ifft = planner.plan_fft_inverse(fft_size);
         let scratch_len = fft.get_inplace_scratch_len().max(ifft.get_inplace_scratch_len());
 
         let mut sq = DwtSquarer {
-            modulus: modulus.clone(),
-            fft_size,
-            fft,
-            ifft,
+            mode: Mode::Ibdwt, modulus: modulus.clone(), k, exp, fft_size,
+            fft, ifft,
             signal: vec![Complex::new(0.0, 0.0); fft_size],
             scratch: vec![Complex::new(0.0, 0.0); scratch_len],
-            value: None,
-            strategy: Strategy::Ibdwt { bit_pos, fwd, inv_w },
+            bit_pos, fwd, inv_w, m_limbs,
+            ibdwt_limbs: vec![0i64; fft_size],
+            value: None, zp_limbs: Vec::new(),
         };
-        sq.ibdwt_load(x);
+        sq.ibdwt_load_biguint(x);
         sq
     }
 
-    /// Zero-padded FFT constructor for k>1.
     fn new_zero_padded(k: u64, exp: u64, modulus: &BigUint, x: &BigUint) -> Self {
         let m_bytes = (modulus.bits() as usize + 7) / 8;
         let n_limbs = (m_bytes + 1) / 2;
@@ -163,34 +136,28 @@ impl DwtSquarer {
         let scratch_len = fft.get_inplace_scratch_len().max(ifft.get_inplace_scratch_len());
 
         DwtSquarer {
-            modulus: modulus.clone(),
-            fft_size,
-            fft,
-            ifft,
+            mode: Mode::ZeroPadded, modulus: modulus.clone(), k, exp, fft_size,
+            fft, ifft,
             signal: vec![Complex::new(0.0, 0.0); fft_size],
             scratch: vec![Complex::new(0.0, 0.0); scratch_len],
+            bit_pos: Vec::new(), fwd: Vec::new(), inv_w: Vec::new(),
+            m_limbs: Vec::new(), ibdwt_limbs: Vec::new(),
             value: Some(x.clone()),
-            strategy: Strategy::ZeroPadded {
-                k,
-                exp,
-                limbs: vec![0i64; fft_size + 1],
-            },
+            zp_limbs: vec![0i64; fft_size + 1],
         }
     }
 
-    /// One squaring: x ← x² mod M.
     pub fn square(&mut self) {
-        match &self.strategy {
-            Strategy::Ibdwt { .. } => self.ibdwt_square(),
-            Strategy::ZeroPadded { .. } => self.zeropad_square(),
+        match self.mode {
+            Mode::Ibdwt => self.ibdwt_square(),
+            Mode::ZeroPadded => self.zeropad_square(),
         }
     }
 
-    /// Extract current value as a BigUint.
     pub fn to_biguint(&self) -> BigUint {
-        match &self.strategy {
-            Strategy::Ibdwt { .. } => self.ibdwt_to_biguint(),
-            Strategy::ZeroPadded { .. } => self.value.as_ref().unwrap().clone(),
+        match self.mode {
+            Mode::Ibdwt => self.ibdwt_to_biguint(),
+            Mode::ZeroPadded => self.value.as_ref().unwrap().clone(),
         }
     }
 
@@ -198,72 +165,46 @@ impl DwtSquarer {
     // IBDWT path (k=1)
     // -----------------------------------------------------------------------
 
-    fn ibdwt_load(&mut self, x: &BigUint) {
-        let (bit_pos, fwd) = match &self.strategy {
-            Strategy::Ibdwt { bit_pos, fwd, .. } => (bit_pos, fwd),
-            _ => unreachable!(),
-        };
+    fn ibdwt_load_biguint(&mut self, x: &BigUint) {
         let bytes = x.to_bytes_le();
         for j in 0..self.fft_size {
-            let start = bit_pos[j];
-            let width = bit_pos[j + 1] - start;
-            let v = extract_bits(&bytes, start, width) as f64;
-            self.signal[j] = Complex::new(v * fwd[j], 0.0);
+            let start = self.bit_pos[j];
+            let width = self.bit_pos[j + 1] - start;
+            self.signal[j] = Complex::new(extract_bits(&bytes, start, width) as f64 * self.fwd[j], 0.0);
         }
         self.fft.process_with_scratch(&mut self.signal, &mut self.scratch);
     }
 
     fn ibdwt_square(&mut self) {
-        // 1. Pointwise square
-        for c in &mut self.signal {
-            *c = *c * *c;
-        }
+        for c in &mut self.signal { *c = *c * *c; }
 
-        // 2. IFFT + unweight
         self.ifft.process_with_scratch(&mut self.signal, &mut self.scratch);
         let inv_n = 1.0 / self.fft_size as f64;
-        let inv_w = match &self.strategy {
-            Strategy::Ibdwt { inv_w, .. } => inv_w.clone(),
-            _ => unreachable!(),
-        };
         for j in 0..self.fft_size {
-            self.signal[j].re *= inv_n * inv_w[j];
-            self.signal[j].im = 0.0;
+            self.ibdwt_limbs[j] = (self.signal[j].re * inv_n * self.inv_w[j]).round() as i64;
         }
 
-        // 3. Round + carry
-        let bit_pos = match &self.strategy {
-            Strategy::Ibdwt { bit_pos, .. } => bit_pos.clone(),
-            _ => unreachable!(),
-        };
-        let mut a: Vec<i64> = self.signal.iter().map(|c| c.re.round() as i64).collect();
-        ibdwt_carry(&mut a, &bit_pos, self.fft_size);
+        ibdwt_carry(&mut self.ibdwt_limbs, &self.bit_pos, self.fft_size);
+        limb_reduce(&mut self.ibdwt_limbs, &self.m_limbs, &self.bit_pos, self.fft_size);
 
-        // 4. Reconstruct + reduce + reload
-        let raw = biguint_from_var_limbs(&a, &bit_pos, self.fft_size);
-        let reduced = raw % &self.modulus;
-        self.ibdwt_load(&reduced);
+        for j in 0..self.fft_size {
+            self.signal[j] = Complex::new(self.ibdwt_limbs[j] as f64 * self.fwd[j], 0.0);
+        }
+        self.fft.process_with_scratch(&mut self.signal, &mut self.scratch);
     }
 
     fn ibdwt_to_biguint(&self) -> BigUint {
-        let (bit_pos, inv_w) = match &self.strategy {
-            Strategy::Ibdwt { bit_pos, inv_w, .. } => (bit_pos.clone(), inv_w.clone()),
-            _ => unreachable!(),
-        };
         let mut tmp = self.signal.clone();
         let mut scratch = self.scratch.clone();
         self.ifft.process_with_scratch(&mut tmp, &mut scratch);
-
         let inv_n = 1.0 / self.fft_size as f64;
         for j in 0..self.fft_size {
-            tmp[j].re *= inv_n * inv_w[j];
+            tmp[j].re *= inv_n * self.inv_w[j];
             tmp[j].im = 0.0;
         }
-
         let mut a: Vec<i64> = tmp.iter().map(|c| c.re.round() as i64).collect();
-        ibdwt_carry(&mut a, &bit_pos, self.fft_size);
-        let raw = biguint_from_var_limbs(&a, &bit_pos, self.fft_size);
-        raw % &self.modulus
+        ibdwt_carry(&mut a, &self.bit_pos, self.fft_size);
+        biguint_from_var_limbs(&a, &self.bit_pos, self.fft_size) % &self.modulus
     }
 
     // -----------------------------------------------------------------------
@@ -271,64 +212,52 @@ impl DwtSquarer {
     // -----------------------------------------------------------------------
 
     fn zeropad_square(&mut self) {
-        let (k, exp, limbs) = match &mut self.strategy {
-            Strategy::ZeroPadded { k, exp, limbs } => (*k, *exp, limbs),
-            _ => unreachable!(),
-        };
-        let value = self.value.as_ref().unwrap();
-        let bytes = value.to_bytes_le();
-
-        let n_data_limbs = if bytes.is_empty() { 0 } else { (bytes.len() + 1) / 2 };
-
-        // Fill signal with 16-bit limbs + zero-pad
-        for i in 0..n_data_limbs {
-            let lo = bytes.get(2 * i).copied().unwrap_or(0) as f64;
-            let hi = bytes.get(2 * i + 1).copied().unwrap_or(0) as f64;
-            self.signal[i] = Complex::new(lo + hi * 256.0, 0.0);
+        // Fill signal with 16-bit limbs directly from BigUint's internal u32
+        // words via iter_u32_digits().  Each u32 word is split into two
+        // signal entries (lo 16 bits, hi 16 bits).  No byte Vec is allocated.
+        self.signal.fill(Complex::new(0.0, 0.0));
+        let mut sig_idx = 0usize;
+        for word in self.value.as_ref().unwrap().iter_u32_digits() {
+            if sig_idx < self.fft_size {
+                self.signal[sig_idx] = Complex::new((word & 0xFFFF) as f64, 0.0);
+            }
+            if sig_idx + 1 < self.fft_size {
+                self.signal[sig_idx + 1] = Complex::new((word >> 16) as f64, 0.0);
+            }
+            sig_idx += 2;
         }
-        self.signal[n_data_limbs..].fill(Complex::new(0.0, 0.0));
 
-        // FFT → square → IFFT
         self.fft.process_with_scratch(&mut self.signal, &mut self.scratch);
-        for c in &mut self.signal {
-            *c = *c * *c;
-        }
+        for c in &mut self.signal { *c = *c * *c; }
         self.ifft.process_with_scratch(&mut self.signal, &mut self.scratch);
 
-        // Round + signed carry propagation into 16-bit limbs.
-        // Uses div_euclid/rem_euclid to correctly handle negative rounding
-        // residues without clamping.
         let inv_n = 1.0 / self.fft_size as f64;
-        let base: i64 = 65536; // 2^16
-        limbs.fill(0);
+        let base: i64 = 65536;
+        self.zp_limbs.fill(0);
         for (i, c) in self.signal.iter().enumerate() {
-            limbs[i] = (c.re * inv_n).round() as i64;
+            self.zp_limbs[i] = (c.re * inv_n).round() as i64;
         }
-        for i in 0..limbs.len() - 1 {
-            let carry = limbs[i].div_euclid(base);
-            limbs[i] = limbs[i].rem_euclid(base);
-            limbs[i + 1] += carry;
+        for i in 0..self.zp_limbs.len() - 1 {
+            let carry = self.zp_limbs[i].div_euclid(base);
+            self.zp_limbs[i] = self.zp_limbs[i].rem_euclid(base);
+            self.zp_limbs[i + 1] += carry;
         }
 
-        // Reconstruct BigUint from non-negative 16-bit limbs packed into u32 words.
-        let last = limbs.iter().rposition(|&v| v != 0).unwrap_or(0);
+        let last = self.zp_limbs.iter().rposition(|&v| v != 0).unwrap_or(0);
         let n_words = (last + 2) / 2;
         let words: Vec<u32> = (0..n_words)
             .map(|i| {
-                let lo = limbs[2 * i] as u32;
-                let hi = limbs.get(2 * i + 1).copied().unwrap_or(0) as u32;
+                let lo = self.zp_limbs[2 * i] as u32;
+                let hi = self.zp_limbs.get(2 * i + 1).copied().unwrap_or(0) as u32;
                 lo | (hi << 16)
             })
             .collect();
-        let sq = BigUint::new(words);
-
-        // kbn reduce
-        self.value = Some(kbn_reduce(sq, k, exp, &self.modulus));
+        self.value = Some(kbn_reduce(BigUint::new(words), self.k, self.exp, &self.modulus));
     }
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
 fn extract_bits(bytes: &[u8], start: u64, width: u64) -> u64 {
@@ -352,18 +281,11 @@ fn write_bits(bytes: &mut [u8], start: u64, width: u64, val: u64) {
     let mut v = val << bit_off;
     let n = ((bit_off + width + 7) / 8) as usize;
     for i in 0..n {
-        if byte_start + i < bytes.len() {
-            bytes[byte_start + i] |= (v & 0xFF) as u8;
-        }
+        if byte_start + i < bytes.len() { bytes[byte_start + i] |= (v & 0xFF) as u8; }
         v >>= 8;
     }
 }
 
-/// IBDWT carry normalization for k=1.
-///
-/// Carry overflow from the last limb represents carry × 2^exp.
-/// Since M = 2^exp − 1, we have 2^exp ≡ 1 (mod M), so carry wraps
-/// to a[0] with factor 1.  The caller's `% modulus` canonicalizes.
 fn ibdwt_carry(a: &mut [i64], bit_pos: &[u64], len: usize) {
     let mut carry: i64 = 0;
     for j in 0..len {
@@ -373,8 +295,6 @@ fn ibdwt_carry(a: &mut [i64], bit_pos: &[u64], len: usize) {
         carry = arith_shr(v, width);
         a[j] = v & mask;
     }
-
-    // Wrap: carry × 2^exp ≡ carry (mod 2^exp − 1)
     let mut wrap_iters = 0;
     while carry != 0 {
         wrap_iters += 1;
@@ -389,8 +309,6 @@ fn ibdwt_carry(a: &mut [i64], bit_pos: &[u64], len: usize) {
             a[j] = v & mask;
         }
     }
-
-    // Handle negative limbs from FP rounding: add 2^exp ≡ 1 (mod M)
     if a.iter().any(|&v| v < 0) {
         a[0] += 1;
         carry = 0;
@@ -415,20 +333,41 @@ fn ibdwt_carry(a: &mut [i64], bit_pos: &[u64], len: usize) {
     }
 }
 
+fn limb_reduce(a: &mut [i64], m: &[i64], bit_pos: &[u64], len: usize) {
+    let mut ge = true;
+    for j in (0..len).rev() {
+        if a[j] > m[j] { break; }
+        if a[j] < m[j] { ge = false; break; }
+    }
+    if ge {
+        let mut borrow: i64 = 0;
+        for j in 0..len {
+            let width = bit_pos[j + 1] - bit_pos[j];
+            let mask = limb_mask_i64(width);
+            let radix = 1i128 << width;
+            let v = a[j] as i128 - m[j] as i128 + borrow as i128;
+            if v < 0 {
+                a[j] = ((v + radix) as i64) & mask;
+                borrow = -1;
+            } else {
+                a[j] = (v as i64) & mask;
+                borrow = 0;
+            }
+        }
+    }
+}
+
 fn biguint_from_var_limbs(a: &[i64], bit_pos: &[u64], len: usize) -> BigUint {
     let total_bits = bit_pos[len];
     let total_bytes = (total_bits as usize + 7) / 8;
     let mut bytes = vec![0u8; total_bytes];
     for j in 0..len {
-        let start = bit_pos[j];
-        let width = bit_pos[j + 1] - start;
-        write_bits(&mut bytes, start, width, a[j] as u64);
+        write_bits(&mut bytes, bit_pos[j], bit_pos[j + 1] - bit_pos[j], a[j] as u64);
     }
     while bytes.last() == Some(&0) { bytes.pop(); }
     if bytes.is_empty() { BigUint::zero() } else { BigUint::from_bytes_le(&bytes) }
 }
 
-/// kbn reduction: x mod M = k·2^exp − 1.
 fn kbn_reduce(x: BigUint, k: u64, exp: u64, modulus: &BigUint) -> BigUint {
     if x.is_zero() { return x; }
     let q = (&x >> exp as usize) / k;
@@ -490,10 +429,8 @@ mod tests {
     #[test]
     fn test_weights_unity_when_l_divides_exp() {
         let sq = DwtSquarer::new(1, 32, &BigUint::from(1u64));
-        if let Strategy::Ibdwt { fwd, .. } = &sq.strategy {
-            for (j, &w) in fwd.iter().enumerate() {
-                assert!((w - 1.0).abs() < 1e-12, "weight[{j}] = {w}, expected 1.0");
-            }
+        for (j, &w) in sq.fwd.iter().enumerate() {
+            assert!((w - 1.0).abs() < 1e-12, "weight[{j}] = {w}, expected 1.0");
         }
     }
 
@@ -541,8 +478,7 @@ mod tests {
         let x = BigUint::from(3u64);
         let mut sq = DwtSquarer::new(k, exp, &x);
         sq.square();
-        let expected = (&x * &x) % &m;
-        assert_eq!(sq.to_biguint(), expected);
+        assert_eq!(sq.to_biguint(), (&x * &x) % &m);
     }
 
     #[test]
