@@ -1,8 +1,8 @@
 //! Fermat test benchmark for 1003*2^2499999-1.
 //!
-//! Runs a configurable number of squaring iterations with each viable method
-//! (fft, dwt, kbn), verifies they produce identical results, and projects
-//! total runtime for a full Fermat test.
+//! Runs each viable squaring method (fft, dwt, kbn) for a fixed duration
+//! (default 120s), counts iterations completed, and projects total runtime
+//! for a full Fermat test.  Verifies all methods produce identical results.
 
 use armcrunch::{fermat_test, fermat_test_dwt, Kbn, FftSquarer, DwtSquarer};
 use num_bigint::BigUint;
