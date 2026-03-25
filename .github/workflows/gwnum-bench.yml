@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -59,7 +60,40 @@ jobs:
           else
             echo "Standard build failed, attempting C-only build..."
             # Compile just the C/C++ sources without the prebuilt assembly .a
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c cpuid.c
+            # cpuid.c may fail on ARM64 due to x86 inline assembly; if so,
+            # compile without it (gwnum doesn't need real CPUID for benchmarking)
+            if ! gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c cpuid.c 2>/dev/null; then
+              echo "cpuid.c failed (expected on ARM64), building without it..."
+              # We still need the cpuid.o symbols; gwnum references them.
+              # Build a stub that just defines the required globals.
+              cat > cpuid_stub.c << 'STUB'
+            #include <string.h>
+            char CPU_BRAND[49] = "ARM64";
+            double CPU_SPEED = 3000.0;
+            unsigned int CPU_FLAGS = 0;
+            unsigned int CPU_CORES = 1;
+            unsigned int CPU_HYPERTHREADS = 1;
+            int CPU_L1_CACHE_SIZE = 32768;
+            int CPU_L2_CACHE_SIZE = 1048576;
+            int CPU_L3_CACHE_SIZE = -1;
+            int CPU_L1_CACHE_LINE_SIZE = 64;
+            int CPU_L2_CACHE_LINE_SIZE = 64;
+            int CPU_L3_CACHE_LINE_SIZE = -1;
+            int CPU_L1_DATA_TLBS = -1;
+            int CPU_L2_DATA_TLBS = -1;
+            int CPU_L3_DATA_TLBS = -1;
+            int CPU_L1_SET_ASSOCIATIVE = -1;
+            int CPU_L2_SET_ASSOCIATIVE = -1;
+            int CPU_L3_SET_ASSOCIATIVE = -1;
+            unsigned int CPU_SIGNATURE = 0;
+            int CPU_ARCHITECTURE = 0;
+            void one_hundred_thousand_clocks(void) {}
+            void one_million_clocks(void) {}
+            void guessCpuType(void) {}
+            void guessCpuSpeed(void) {}
+            STUB
+              gcc ${{ matrix.cc_flags }} -O2 -c cpuid_stub.c -o cpuid.o
+            fi
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwnum.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwtables.c
             g++ -I.. -I../qd -std=c++11 -O2 -c gwthread.cpp
