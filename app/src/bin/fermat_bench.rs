@@ -21,6 +21,7 @@ fn main() {
 
     let mut duration_secs: u64 = 120;
     let mut full_method: Option<String> = None;
+    let mut include_kbn = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -33,11 +34,15 @@ fn main() {
                 i += 1;
                 full_method = Some(args.get(i).expect("--full requires a method name").clone());
             }
+            "--kbn" => {
+                include_kbn = true;
+            }
             _ => {
-                eprintln!("Usage: fermat_bench [--duration SECS] [--full fft|dwt]");
+                eprintln!("Usage: fermat_bench [--duration SECS] [--full fft|dwt] [--kbn]");
                 eprintln!("  --duration SECS  Target duration for the fastest method (default: 120)");
                 eprintln!("                   All methods run the same number of iterations.");
                 eprintln!("  --full METHOD    Run a complete Fermat test (fft or dwt)");
+                eprintln!("  --kbn            Include kbn method (slow, excluded by default)");
                 std::process::exit(1);
             }
         }
@@ -52,7 +57,7 @@ fn main() {
     if let Some(method) = full_method {
         run_full_test(&kbn, &method);
     } else {
-        run_fixed_iteration_benchmark(&kbn, duration_secs);
+        run_fixed_iteration_benchmark(&kbn, duration_secs, include_kbn);
     }
 }
 
@@ -138,7 +143,7 @@ fn find_gwnum_binary() -> Option<(std::path::PathBuf, &'static str)> {
 // Main benchmark flow
 // ---------------------------------------------------------------------------
 
-fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64) {
+fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64, include_kbn: bool) {
     let modulus = kbn.value();
     let a_big = BigUint::from(BASE);
 
@@ -179,24 +184,28 @@ fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64) {
         ms
     };
 
-    let kbn_ms_per = {
+    let kbn_ms_per = if include_kbn {
         let mut x = x0.clone();
         let start = Instant::now();
         for _ in 0..warmup_iters { armcrunch::square_mod_kbn(&mut x, K, N, &modulus); }
         let ms = start.elapsed().as_secs_f64() * 1000.0 / warmup_iters as f64;
         eprintln!("  kbn:  {:.3} ms/iter (warmup)", ms);
-        ms
+        Some(ms)
+    } else {
+        None
     };
 
     // Phase 2: Derive common iteration count from the fastest method
-    let mut best_ms = fft_ms_per.min(dwt_ms_per).min(kbn_ms_per);
+    let mut best_ms = fft_ms_per.min(dwt_ms_per);
     if let Some(gms) = gwnum_ms_per { best_ms = best_ms.min(gms); }
+    if let Some(kms) = kbn_ms_per { best_ms = best_ms.min(kms); }
     let iters = ((target_duration_secs as f64 * 1000.0) / best_ms).max(100.0) as u64;
 
+    let slowest_ms = if let Some(kms) = kbn_ms_per { kms.max(fft_ms_per).max(dwt_ms_per) } else { fft_ms_per.max(dwt_ms_per) };
     println!("\nRunning all methods for {} iterations\n  (fastest ~{}, slowest ~{})\n",
         iters,
         format_duration(best_ms * iters as f64 / 1000.0),
-        format_duration(kbn_ms_per * iters as f64 / 1000.0));
+        format_duration(slowest_ms * iters as f64 / 1000.0));
 
     struct RowData {
         name: String,
@@ -236,7 +245,7 @@ fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64) {
     }
 
     // Run kbn
-    {
+    if include_kbn {
         eprint!("  Running kbn ({} iters)...", iters);
         let mut x = x0.clone();
         let start = Instant::now();
@@ -279,7 +288,7 @@ fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64) {
         for _ in 0..iters { squarer.square(); }
         verify_values.push(("dwt", squarer.to_biguint()));
     }
-    {
+    if include_kbn {
         let mut x = x0.clone();
         for _ in 0..iters { armcrunch::square_mod_kbn(&mut x, K, N, &modulus); }
         verify_values.push(("kbn", x));
