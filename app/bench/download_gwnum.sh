@@ -23,10 +23,8 @@ ARCH=$(uname -m)
 
 if [ "$OS" = "Linux" ] && [ "$ARCH" = "x86_64" ]; then
     PLATFORM="linux-amd64"
-elif [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
-    # Apple Silicon: default to native ARM64 build
-    PLATFORM="macos-arm64"
-elif [ "$OS" = "Darwin" ] && [ "$ARCH" = "x86_64" ]; then
+elif [ "$OS" = "Darwin" ]; then
+    # Always use x86_64 build on macOS (runs via Rosetta on Apple Silicon)
     PLATFORM="macos-amd64"
 else
     echo "Error: No pre-built gwnum_bench available for $OS/$ARCH" >&2
@@ -74,17 +72,3 @@ fi
 
 chmod +x "$TARGET_PATH"
 echo "Downloaded $TARGET_PATH"
-
-# On macOS Apple Silicon, also download the Rosetta (amd64) version
-# for side-by-side comparison
-if [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
-    ROSETTA_NAME="gwnum_bench-macos-amd64"
-    ROSETTA_PATH="${SCRIPT_DIR}/${ROSETTA_NAME}"
-    if [ ! -x "$ROSETTA_PATH" ] || [ "$FORCE" = true ]; then
-        echo "Also downloading Rosetta (x86_64) version for comparison..."
-        ROSETTA_URL="https://github.com/${REPO}/releases/latest/download/${ROSETTA_NAME}"
-        curl -sL -o "$ROSETTA_PATH" "$ROSETTA_URL" && chmod +x "$ROSETTA_PATH" \
-            && echo "Downloaded $ROSETTA_PATH" \
-            || echo "Warning: Could not download Rosetta version (optional)"
-    fi
-fi
