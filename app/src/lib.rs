@@ -1,6 +1,7 @@
 mod arithmetic;
 mod negacyclic;
 pub mod fft_engine;
+pub mod neon_fft;
 mod dwt;
 mod fermat;
 mod ntt;

@@ -21,6 +21,19 @@ use rustfft::num_complex::Complex;
 
 use crate::fft_engine::{FftEngine, RealFftEngine};
 
+/// Select the best FFT engine for the current platform.
+fn make_engine(fft_size: usize) -> Box<dyn FftEngine> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::neon_fft::NeonFftEngine;
+        Box::new(NeonFftEngine::new(fft_size))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        Box::new(RealFftEngine::new(fft_size))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shift-safe helpers
 // ---------------------------------------------------------------------------
@@ -113,7 +126,7 @@ impl DwtSquarer {
             m_limbs[j] = extract_bits(&m_bytes, bit_pos[j], bit_pos[j + 1] - bit_pos[j]) as i64;
         }
 
-        let engine = Box::new(RealFftEngine::new(fft_size));
+        let engine = make_engine(fft_size);
         let scratch_fwd = vec![Complex::new(0.0, 0.0); engine.forward_scratch_len()];
         let scratch_inv = vec![Complex::new(0.0, 0.0); engine.inverse_scratch_len()];
 
@@ -140,7 +153,7 @@ impl DwtSquarer {
         let n_limbs = (m_bytes + 1) / 2;
         let fft_size = (2 * n_limbs).next_power_of_two();
 
-        let engine = Box::new(RealFftEngine::new(fft_size));
+        let engine = make_engine(fft_size);
         let scratch_fwd = vec![Complex::new(0.0, 0.0); engine.forward_scratch_len()];
         let scratch_inv = vec![Complex::new(0.0, 0.0); engine.inverse_scratch_len()];
 
