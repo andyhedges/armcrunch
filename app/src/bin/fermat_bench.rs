@@ -2,7 +2,7 @@
 //!
 //! Benchmarks all viable squaring methods using a common fixed iteration count:
 //! 1. Warmup: estimates throughput of each method
-//! 2. Derives iteration count so the fastest method runs for ~duration seconds
+//! 2. Derives iteration count so the slowest method runs for ~duration seconds
 //! 3. Runs every method (including gwnum if available) for that exact count
 //! 4. Reports a table sorted by speed with ratio vs the fastest method
 //! 5. Verifies all Rust methods produce identical results
@@ -19,7 +19,7 @@ const BASE: u64 = 3;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut duration_secs: u64 = 120;
+    let mut duration_secs: u64 = 150;
     let mut full_method: Option<String> = None;
     let mut include_kbn = false;
     let mut i = 1;
@@ -39,7 +39,7 @@ fn main() {
             }
             _ => {
                 eprintln!("Usage: fermat_bench [--duration SECS] [--full fft|dwt] [--kbn]");
-                eprintln!("  --duration SECS  Target duration for the fastest method (default: 120)");
+                eprintln!("  --duration SECS  Max duration for the slowest method (default: 150)");
                 eprintln!("                   All methods run the same number of iterations.");
                 eprintln!("  --full METHOD    Run a complete Fermat test (fft or dwt)");
                 eprintln!("  --kbn            Include kbn method (slow, excluded by default)");
@@ -218,13 +218,15 @@ fn run_fixed_iteration_benchmark(kbn: &Kbn, target_duration_secs: u64, include_k
         None
     };
 
-    // Phase 2: Derive common iteration count from the fastest method
+    // Phase 2: Derive common iteration count from the slowest method
+    // so that the slowest method takes approximately target_duration_secs.
+    let mut slowest_ms = fft_ms_per.max(dwt_ms_per);
+    if let Some(kms) = kbn_ms_per { slowest_ms = slowest_ms.max(kms); }
+    let iters = ((target_duration_secs as f64 * 1000.0) / slowest_ms).max(100.0) as u64;
+
     let mut best_ms = fft_ms_per.min(dwt_ms_per);
     if let Some(gms) = gwnum_ms_per { best_ms = best_ms.min(gms); }
     if let Some(kms) = kbn_ms_per { best_ms = best_ms.min(kms); }
-    let iters = ((target_duration_secs as f64 * 1000.0) / best_ms).max(100.0) as u64;
-
-    let slowest_ms = if let Some(kms) = kbn_ms_per { kms.max(fft_ms_per).max(dwt_ms_per) } else { fft_ms_per.max(dwt_ms_per) };
     println!("\nRunning all methods for {} iterations\n  (fastest ~{}, slowest ~{})\n",
         iters,
         format_duration(best_ms * iters as f64 / 1000.0),
