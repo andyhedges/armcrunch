@@ -117,5 +117,34 @@ fn bench_square_mod_large(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_square_mod, bench_fft_phases, bench_square_mod_large);
+/// Benchmark at Proth-candidate scale: 1007·2^4527232 − 1 (~1.36M decimal digits).
+///
+/// NOTE: at this size DwtSquarer uses a 2^21 FFT (b_lo=3, 38% padding overhead)
+/// while FftSquarer needs only a 2^20 FFT (16-bit limbs).  The DWT trades
+/// in-domain storage and no BigUint allocation against a 2× longer transform.
+fn bench_square_mod_xlarge(c: &mut Criterion) {
+    let k = 1007u64;
+    let exp = 4527232u64;
+    let kbn = Kbn::new(k, exp);
+    let modulus = kbn.value();
+    let x = BigUint::from(3u64);
+    let mut squarer_fft = FftSquarer::new(&modulus);
+    let mut squarer_dwt = DwtSquarer::new(k, exp, &x);
+
+    let mut group = c.benchmark_group("square_mod_xlarge");
+    group.sample_size(10);
+
+    group.bench_function("fft", |b| {
+        let mut xi = x.clone();
+        b.iter(|| squarer_fft.square_kbn(&mut xi, k, exp, &modulus));
+    });
+
+    group.bench_function("dwt", |b| {
+        b.iter(|| squarer_dwt.square());
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_square_mod, bench_fft_phases, bench_square_mod_large, bench_square_mod_xlarge);
 criterion_main!(benches);
