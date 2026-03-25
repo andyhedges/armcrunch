@@ -46,11 +46,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install gmp
 
-      - name: Build gwnum library and gwnum_bench
+      - name: Build gwnum library and benchmark
         run: |
-          cd /tmp/Prime95/gwnum
+          GWNUM_DIR=/tmp/Prime95/gwnum
+          cd "$GWNUM_DIR"
 
-          GMP_PREFIX=""
           GMP_INC=""
           GMP_LIB=""
           if [ "$RUNNER_OS" = "macOS" ]; then
@@ -59,27 +59,31 @@ jobs:
             GMP_LIB="-L$GMP_PREFIX/lib"
           fi
 
-          build_bench() {
-            # Try to compile and link gwnum_bench against the built gwnum.a
+          try_link() {
             gcc -O2 \
-              -I/tmp/Prime95/gwnum -I/tmp/Prime95 \
-              ${{ matrix.cc_flags }} \
-              $GMP_INC \
-              -o $GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }} \
-              $GITHUB_WORKSPACE/app/bench/gwnum_bench.c \
-              /tmp/Prime95/gwnum/gwnum.a \
-              $GMP_LIB \
-              ${{ matrix.link_flags }} 2>&1
+              -I"$GWNUM_DIR" -I/tmp/Prime95 \
+              ${{ matrix.cc_flags }} $GMP_INC \
+              -o "$GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}" \
+              "$GITHUB_WORKSPACE/app/bench/gwnum_bench.c" \
+              "$GWNUM_DIR/gwnum.a" \
+              $GMP_LIB ${{ matrix.link_flags }} 2>&1
           }
 
-          build_c_only() {
-            echo "Building C-only gwnum (no pre-built assembly)..."
-            # Clean any previous build artifacts
+          # Phase 1: try standard makefile build + link
+          DONE=false
+          if make -f ${{ matrix.gwnum_make }} 2>/dev/null && try_link; then
+            echo "Built and linked with ${{ matrix.gwnum_make }} (assembly FFT)"
+            DONE=true
+          fi
+
+          # Phase 2: C-only fallback if phase 1 failed
+          if [ "$DONE" = false ]; then
+            echo "Falling back to C-only build..."
             rm -f *.o gwnum.a
 
-            # cpuid.c: may fail on ARM64 (x86 inline asm)
+            # cpuid.c: x86 inline asm fails on ARM64
             if ! gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c cpuid.c 2>/dev/null; then
-              echo "  cpuid.c failed, using stub..."
+              echo "  cpuid.c: using stub (x86 asm not available)"
               printf '%s\n' \
                 '#include <string.h>' \
                 'char CPU_BRAND[49] = "ARM64";' \
@@ -108,10 +112,8 @@ jobs:
                 > cpuid_stub.c
               gcc ${{ matrix.cc_flags }} -O2 -c cpuid_stub.c -o cpuid.o
             fi
-
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwnum.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwtables.c
-            # gwthread.cpp: __builtin_ia32_pause is x86-only; stub it on ARM64
             g++ -I.. -I../qd -std=c++11 -O2 -D'__builtin_ia32_pause()=' -c gwthread.cpp
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwini.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwbench.c
@@ -121,32 +123,13 @@ jobs:
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c radix.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 $GMP_INC -c ecmstag1.c
             ar -rs gwnum.a cpuid.o gwnum.o gwtables.o gwthread.o gwini.o gwbench.o gwutil.o gwdbldbl.o giants.o radix.o ecmstag1.o
-            echo "  C-only gwnum.a built successfully"
-          }
-
-          # Strategy: try makemac/make64 first, then try linking.
-          # If either fails, fall back to C-only build.
-          BUILT=false
-
-          if make -f ${{ matrix.gwnum_make }} 2>/dev/null; then
-            echo "gwnum built with ${{ matrix.gwnum_make }}, attempting link..."
-            if build_bench; then
-              echo "Link succeeded!"
-              BUILT=true
-            else
-              echo "Link failed (likely incompatible pre-built objects), falling back to C-only..."
-            fi
-          else
-            echo "make -f ${{ matrix.gwnum_make }} failed, falling back to C-only..."
+            echo "  C-only gwnum.a built"
+            try_link
+            echo "  Linked successfully (C-only FFT)"
           fi
 
-          if [ "$BUILT" = false ]; then
-            build_c_only
-            build_bench
-          fi
-
-          strip $GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }} || true
-          ls -lh $GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}
+          strip "$GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}" || true
+          ls -lh "$GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
