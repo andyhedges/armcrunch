@@ -22,15 +22,9 @@ jobs:
             gwnum_make: makemac
             cc_flags: "-DX86_64 -std=gnu99"
             link_flags: "-lm -lpthread -lstdc++ -lgmp"
-          - os: macos-26
-            platform: macos-arm64
-            gwnum_make: makemac
-            cc_flags: "-std=gnu99"
-            link_flags: "-lm -lpthread -lstdc++ -lgmp"
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.platform }}
-    continue-on-error: ${{ matrix.platform == 'macos-arm64' }}
 
     steps:
       - name: Checkout armcrunch
@@ -49,56 +43,7 @@ jobs:
 
       - name: Build gwnum library
         working-directory: /tmp/Prime95/gwnum
-        run: |
-          if make -f ${{ matrix.gwnum_make }} 2>/dev/null; then
-            echo "gwnum built successfully with ${{ matrix.gwnum_make }}"
-          else
-            echo "Standard build failed, attempting C-only build..."
-            # cpuid.c may fail on ARM64 due to x86 inline assembly
-            if ! gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c cpuid.c 2>/dev/null; then
-              echo "  cpuid.c failed (expected on ARM64), building without it..."
-              printf '%s\n' \
-                '#include <string.h>' \
-                'char CPU_BRAND[49] = "ARM64";' \
-                'double CPU_SPEED = 3000.0;' \
-                'unsigned int CPU_FLAGS = 0;' \
-                'unsigned int CPU_CORES = 1;' \
-                'unsigned int CPU_HYPERTHREADS = 1;' \
-                'int CPU_L1_CACHE_SIZE = 32768;' \
-                'int CPU_L2_CACHE_SIZE = 1048576;' \
-                'int CPU_L3_CACHE_SIZE = -1;' \
-                'int CPU_L1_CACHE_LINE_SIZE = 64;' \
-                'int CPU_L2_CACHE_LINE_SIZE = 64;' \
-                'int CPU_L3_CACHE_LINE_SIZE = -1;' \
-                'int CPU_L1_DATA_TLBS = -1;' \
-                'int CPU_L2_DATA_TLBS = -1;' \
-                'int CPU_L3_DATA_TLBS = -1;' \
-                'int CPU_L1_SET_ASSOCIATIVE = -1;' \
-                'int CPU_L2_SET_ASSOCIATIVE = -1;' \
-                'int CPU_L3_SET_ASSOCIATIVE = -1;' \
-                'unsigned int CPU_SIGNATURE = 0;' \
-                'int CPU_ARCHITECTURE = 0;' \
-                'void one_hundred_thousand_clocks(void) {}' \
-                'void one_million_clocks(void) {}' \
-                'void guessCpuType(void) {}' \
-                'void guessCpuSpeed(void) {}' \
-                > cpuid_stub.c
-              gcc ${{ matrix.cc_flags }} -O2 -c cpuid_stub.c -o cpuid.o
-            fi
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwnum.c
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwtables.c
-            # gwthread.cpp: __builtin_ia32_pause is x86-only; stub it on ARM64
-            g++ -I.. -I../qd -std=c++11 -O2 -D'__builtin_ia32_pause()=' -c gwthread.cpp
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwini.c
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwbench.c
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwutil.c
-            g++ -I.. -I../qd -std=c++11 -O2 -c gwdbldbl.cpp
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c giants.c
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c radix.c
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -I$(brew --prefix gmp 2>/dev/null || echo /usr/include) -c ecmstag1.c
-            ar -rs gwnum.a cpuid.o gwnum.o gwtables.o gwthread.o gwini.o gwbench.o gwutil.o gwdbldbl.o giants.o radix.o ecmstag1.o
-            echo "C-only gwnum.a built successfully"
-          fi
+        run: make -f ${{ matrix.gwnum_make }}
 
       - name: Build gwnum_bench
         run: |
@@ -106,9 +51,9 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             GMP_PREFIX=$(brew --prefix gmp)
           fi
-          # Try linking; on macOS 26 the new linker may reject old pre-built
-          # assembly objects from macosx64/gwnum.a, so try -Wl,-ld_classic
-          # first (legacy linker that is compatible with older object formats).
+          # On macOS 26 the new linker may reject old pre-built assembly
+          # objects from macosx64/gwnum.a, so try -Wl,-ld_classic first
+          # (legacy linker compatible with older object formats).
           LINK_SUCCESS=false
           for EXTRA_FLAGS in "-Wl,-ld_classic" ""; do
             if gcc -O2 \
@@ -165,6 +110,5 @@ jobs:
             |--------|----------|-------|
             | `gwnum_bench-linux-amd64` | Linux x86_64 | Static binary, uses AVX2 assembly FFT |
             | `gwnum_bench-macos-amd64` | macOS x86_64 | Runs on Intel Macs or Apple Silicon via Rosetta |
-            | `gwnum_bench-macos-arm64` | macOS ARM64 | Native Apple Silicon, C-only FFT (no x86 assembly) |
 
             Usage: `./gwnum_bench-<platform> [--k K] [--n N] [--iters ITERS]`
