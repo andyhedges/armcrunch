@@ -39,7 +39,12 @@ jobs:
 
       - name: Install GMP (macOS)
         if: runner.os == 'macOS'
-        run: brew install gmp
+        run: |
+          brew install gmp
+          # Remove dylib files to force static linking of GMP.
+          # This makes the binary portable across macOS installations
+          # (Intel Homebrew at /usr/local vs Apple Silicon at /opt/homebrew).
+          rm -f $(brew --prefix gmp)/lib/libgmp*.dylib
 
       - name: Build gwnum library
         working-directory: /tmp/Prime95/gwnum
