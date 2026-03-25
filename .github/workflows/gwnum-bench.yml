@@ -30,6 +30,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.platform }}
+    continue-on-error: ${{ matrix.platform == 'macos-arm64' }}
 
     steps:
       - name: Checkout armcrunch
@@ -46,44 +47,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install gmp
 
-      - name: Build gwnum library and benchmark
+      - name: Build gwnum library
+        working-directory: /tmp/Prime95/gwnum
         run: |
-          GWNUM_DIR=/tmp/Prime95/gwnum
-          cd "$GWNUM_DIR"
-
-          GMP_INC=""
-          GMP_LIB=""
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            GMP_PREFIX=$(brew --prefix gmp)
-            GMP_INC="-I$GMP_PREFIX/include"
-            GMP_LIB="-L$GMP_PREFIX/lib"
-          fi
-
-          try_link() {
-            gcc -O2 \
-              -I"$GWNUM_DIR" -I/tmp/Prime95 \
-              ${{ matrix.cc_flags }} $GMP_INC \
-              -o "$GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}" \
-              "$GITHUB_WORKSPACE/app/bench/gwnum_bench.c" \
-              "$GWNUM_DIR/gwnum.a" \
-              $GMP_LIB ${{ matrix.link_flags }} 2>&1
-          }
-
-          # Phase 1: try standard makefile build + link
-          DONE=false
-          if make -f ${{ matrix.gwnum_make }} 2>/dev/null && try_link; then
-            echo "Built and linked with ${{ matrix.gwnum_make }} (assembly FFT)"
-            DONE=true
-          fi
-
-          # Phase 2: C-only fallback if phase 1 failed
-          if [ "$DONE" = false ]; then
-            echo "Falling back to C-only build..."
-            rm -f *.o gwnum.a
-
-            # cpuid.c: x86 inline asm fails on ARM64
+          if make -f ${{ matrix.gwnum_make }} 2>/dev/null; then
+            echo "gwnum built successfully with ${{ matrix.gwnum_make }}"
+          else
+            echo "Standard build failed, attempting C-only build..."
+            # cpuid.c may fail on ARM64 due to x86 inline assembly
             if ! gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c cpuid.c 2>/dev/null; then
-              echo "  cpuid.c: using stub (x86 asm not available)"
+              echo "  cpuid.c failed (expected on ARM64), building without it..."
               printf '%s\n' \
                 '#include <string.h>' \
                 'char CPU_BRAND[49] = "ARM64";' \
@@ -114,6 +87,7 @@ jobs:
             fi
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwnum.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwtables.c
+            # gwthread.cpp: __builtin_ia32_pause is x86-only; stub it on ARM64
             g++ -I.. -I../qd -std=c++11 -O2 -D'__builtin_ia32_pause()=' -c gwthread.cpp
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwini.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c gwbench.c
@@ -121,15 +95,45 @@ jobs:
             g++ -I.. -I../qd -std=c++11 -O2 -c gwdbldbl.cpp
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c giants.c
             gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -c radix.c
-            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 $GMP_INC -c ecmstag1.c
+            gcc -I.. -I../sqlite-amalgamation-3420000 ${{ matrix.cc_flags }} -O2 -I$(brew --prefix gmp 2>/dev/null || echo /usr/include) -c ecmstag1.c
             ar -rs gwnum.a cpuid.o gwnum.o gwtables.o gwthread.o gwini.o gwbench.o gwutil.o gwdbldbl.o giants.o radix.o ecmstag1.o
-            echo "  C-only gwnum.a built"
-            try_link
-            echo "  Linked successfully (C-only FFT)"
+            echo "C-only gwnum.a built successfully"
           fi
 
-          strip "$GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}" || true
-          ls -lh "$GITHUB_WORKSPACE/gwnum_bench-${{ matrix.platform }}"
+      - name: Build gwnum_bench
+        run: |
+          GMP_PREFIX=""
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            GMP_PREFIX=$(brew --prefix gmp)
+          fi
+          # Try linking; on macOS 26 the new linker may reject old pre-built
+          # assembly objects from macosx64/gwnum.a, so try -Wl,-ld_classic
+          # first (legacy linker that is compatible with older object formats).
+          LINK_SUCCESS=false
+          for EXTRA_FLAGS in "-Wl,-ld_classic" ""; do
+            if gcc -O2 \
+              -I/tmp/Prime95/gwnum -I/tmp/Prime95 \
+              ${{ matrix.cc_flags }} \
+              ${GMP_PREFIX:+-I$GMP_PREFIX/include} \
+              -o gwnum_bench-${{ matrix.platform }} \
+              app/bench/gwnum_bench.c \
+              /tmp/Prime95/gwnum/gwnum.a \
+              ${GMP_PREFIX:+-L$GMP_PREFIX/lib} \
+              ${{ matrix.link_flags }} \
+              $EXTRA_FLAGS 2>&1; then
+              echo "Linked successfully${EXTRA_FLAGS:+ with $EXTRA_FLAGS}"
+              LINK_SUCCESS=true
+              break
+            else
+              echo "Link failed${EXTRA_FLAGS:+ with $EXTRA_FLAGS}, trying next..."
+            fi
+          done
+          if [ "$LINK_SUCCESS" = false ]; then
+            echo "All link attempts failed"
+            exit 1
+          fi
+          strip gwnum_bench-${{ matrix.platform }} || true
+          ls -lh gwnum_bench-${{ matrix.platform }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -147,14 +151,13 @@ jobs:
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            gwnum_bench-linux-amd64/gwnum_bench-linux-amd64
-            gwnum_bench-macos-amd64/gwnum_bench-macos-amd64
-            gwnum_bench-macos-arm64/gwnum_bench-macos-arm64
+          files: gwnum_bench-*
           body: |
             Pre-built gwnum_bench binaries for benchmarking gwnum modular squaring.
 
