@@ -11,6 +11,7 @@
 //! - Inverse: reverse the unpack, run N/2-point complex IFFT, unpack reals.
 
 use rustfft::num_complex::Complex;
+use std::cell::UnsafeCell;
 use std::f64::consts::PI;
 
 // ---------------------------------------------------------------------------
@@ -83,30 +84,78 @@ unsafe fn butterfly(a_ptr: *mut f64, b_ptr: *mut f64, w_re: f64, w_im: f64) {
 }
 
 // ---------------------------------------------------------------------------
-// Radix-2 DIT complex FFT (in-place)
+// Precomputed twiddle tables
 // ---------------------------------------------------------------------------
 
-/// In-place radix-2 decimation-in-time complex FFT.
-/// No normalization is applied (caller divides by N for inverse).
-fn complex_fft(data: &mut [Complex<f64>], n: usize, inverse: bool) {
-    if n <= 1 {
-        return;
+/// Precomputed twiddle factors for all FFT passes and real FFT unpack.
+/// Built once at engine construction; eliminates all per-transform trig.
+struct TwiddleTable {
+    /// Twiddle factors for each radix-2 pass (forward direction).
+    /// forward[pass][k] = (cos(-π·k/half), sin(-π·k/half))
+    forward: Vec<Vec<(f64, f64)>>,
+    /// Twiddle factors for each radix-2 pass (inverse direction).
+    inverse: Vec<Vec<(f64, f64)>>,
+    /// Real FFT unpack twiddles (forward): e^{-2πik/N} for k=0..M
+    real_fwd: Vec<Complex<f64>>,
+    /// Real FFT unpack twiddles (inverse): e^{+2πik/N} for k=0..M
+    real_inv: Vec<Complex<f64>>,
+}
+
+impl TwiddleTable {
+    /// Build twiddle tables for a complex FFT of length `complex_n`.
+    /// The corresponding real FFT length is `2 * complex_n`.
+    fn new(complex_n: usize) -> Self {
+        let mut forward = Vec::new();
+        let mut inverse = Vec::new();
+
+        let mut half = 1;
+        while half < complex_n {
+            let mut fwd_pass = Vec::with_capacity(half);
+            let mut inv_pass = Vec::with_capacity(half);
+            for k in 0..half {
+                let fwd_theta = -PI * k as f64 / half as f64;
+                let inv_theta = PI * k as f64 / half as f64;
+                fwd_pass.push((fwd_theta.cos(), fwd_theta.sin()));
+                inv_pass.push((inv_theta.cos(), inv_theta.sin()));
+            }
+            forward.push(fwd_pass);
+            inverse.push(inv_pass);
+            half *= 2;
+        }
+
+        let real_n = complex_n * 2;
+        let mut real_fwd = Vec::with_capacity(complex_n + 1);
+        let mut real_inv = Vec::with_capacity(complex_n + 1);
+        for k in 0..=complex_n {
+            let fwd_theta = -2.0 * PI * k as f64 / real_n as f64;
+            let inv_theta = 2.0 * PI * k as f64 / real_n as f64;
+            real_fwd.push(Complex::new(fwd_theta.cos(), fwd_theta.sin()));
+            real_inv.push(Complex::new(inv_theta.cos(), inv_theta.sin()));
+        }
+
+        TwiddleTable { forward, inverse, real_fwd, real_inv }
     }
-    debug_assert!(n.is_power_of_two(), "FFT length must be a power of 2");
+}
+
+// ---------------------------------------------------------------------------
+// Radix-2 DIT complex FFT with precomputed twiddle tables
+// ---------------------------------------------------------------------------
+
+/// In-place radix-2 DIT FFT using precomputed twiddle factors.
+/// No normalization applied.
+fn complex_fft_precomp(data: &mut [Complex<f64>], n: usize, twiddles: &[Vec<(f64, f64)>]) {
+    if n <= 1 { return; }
 
     bit_reverse_permute(data, n);
 
-    let sign = if inverse { 1.0 } else { -1.0 };
     let mut half = 1;
+    let mut pass = 0;
     while half < n {
         let step = half * 2;
-        let angle = sign * PI / half as f64;
+        let tw = &twiddles[pass];
 
         for k in 0..half {
-            let theta = angle * k as f64;
-            let w_re = theta.cos();
-            let w_im = theta.sin();
-
+            let (w_re, w_im) = tw[k];
             let mut j = k;
             while j < n {
                 let i2 = j + half;
@@ -119,92 +168,60 @@ fn complex_fft(data: &mut [Complex<f64>], n: usize, inverse: bool) {
             }
         }
         half = step;
+        pass += 1;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Real FFT via packing trick
+// Real FFT with precomputed twiddles and external buffer
 // ---------------------------------------------------------------------------
 
-/// Forward real FFT: N reals → N/2+1 complex spectrum.
-///
-/// Standard algorithm:
-/// 1. Pack N reals into N/2 complex: z[k] = x[2k] + i·x[2k+1]
-/// 2. Compute N/2-point complex FFT of z
-/// 3. Unpack using:
-///    X[k] = (Z[k] + conj(Z[M-k])) / 2
-///          - i · (Z[k] - conj(Z[M-k])) / 2 · W_N^k
-///    where M = N/2, W_N = e^{-2πi/N}, and Z[M] wraps to Z[0].
-fn real_fft_forward(input: &[f64], output: &mut [Complex<f64>]) {
+/// Forward real FFT using precomputed twiddles and caller-provided buffer.
+fn real_fft_forward_precomp(
+    input: &[f64], output: &mut [Complex<f64>], z: &mut [Complex<f64>],
+    fft_tw: &[Vec<(f64, f64)>], real_tw: &[Complex<f64>],
+) {
     let n = input.len();
     let m = n / 2;
     debug_assert_eq!(output.len(), m + 1);
+    debug_assert!(z.len() >= m);
 
-    // Step 1: Pack reals into complex
-    let mut z: Vec<Complex<f64>> = (0..m)
-        .map(|k| Complex::new(input[2 * k], input[2 * k + 1]))
-        .collect();
+    for k in 0..m { z[k] = Complex::new(input[2 * k], input[2 * k + 1]); }
+    complex_fft_precomp(&mut z[..m], m, fft_tw);
 
-    // Step 2: N/2-point complex FFT
-    complex_fft(&mut z, m, false);
-
-    // Step 3: Unpack
     for k in 0..=m {
         let zk = z[k % m];
         let zmk = z[if k == 0 { 0 } else { m - k }].conj();
-
-        let a = zk + zmk;       // = 2 * even_part
-        let b = zk - zmk;       // = 2 * odd_part (before twiddle)
-
-        // Twiddle: W_N^k = e^{-2πik/N}
-        let theta = -2.0 * PI * k as f64 / n as f64;
-        let tw = Complex::new(theta.cos(), theta.sin());
-
-        // X[k] = a/2 + b/2 * (-i) * tw
-        //      = a/2 + (-i*b/2) * tw
-        let neg_i_b = Complex::new(b.im, -b.re); // -i * b
+        let a = zk + zmk;
+        let b = zk - zmk;
+        let tw = real_tw[k];
+        let neg_i_b = Complex::new(b.im, -b.re);
         output[k] = (a + neg_i_b * tw) * 0.5;
     }
 }
 
-/// Inverse real FFT: N/2+1 complex spectrum → N reals.
-/// No normalization applied (caller divides by N).
-///
-/// Reverses the forward unpack to recover Z[k], then IFFT, then deinterleave.
-fn real_fft_inverse(input: &[Complex<f64>], output: &mut [f64]) {
+/// Inverse real FFT using precomputed twiddles and caller-provided buffer.
+/// No normalization applied.
+fn real_fft_inverse_precomp(
+    input: &[Complex<f64>], output: &mut [f64], z: &mut [Complex<f64>],
+    fft_tw: &[Vec<(f64, f64)>], real_tw: &[Complex<f64>],
+) {
     let m = input.len() - 1;
-    let n = m * 2;
-    debug_assert_eq!(output.len(), n);
+    debug_assert_eq!(output.len(), m * 2);
+    debug_assert!(z.len() >= m);
 
-    // Step 1: Reverse the unpack to recover Z[k]
-    // From forward: X[k] = (Z[k] + Z*[M-k])/2 + (-i)(Z[k] - Z*[M-k])/2 · W^k
-    // So: Z[k] = X[k] + conj(X[M-k]) + i*(X[k] - conj(X[M-k])) * conj(W^k)
-    //   (divided by appropriate factor)
-    //
-    // More precisely, the inverse relation is:
-    // Z[k] = (X[k] + conj(X[M-k])) / 2
-    //       + i · (X[k] - conj(X[M-k])) / 2 · conj(W_N^k)
-    // where this uses the inverse twiddle (positive angle).
-    let mut z: Vec<Complex<f64>> = Vec::with_capacity(m);
     for k in 0..m {
         let xk = input[k];
         let xmk = input[if k == 0 { m } else { m - k }].conj();
-
         let a = xk + xmk;
         let b = xk - xmk;
-
-        let theta = 2.0 * PI * k as f64 / n as f64;
-        let tw = Complex::new(theta.cos(), theta.sin());
-
-        // i * b = (-b.im, b.re)
+        let tw = real_tw[k];
         let i_b = Complex::new(-b.im, b.re);
-        z.push(a + i_b * tw);
+        z[k] = a + i_b * tw;
     }
 
-    // Step 2: N/2-point complex IFFT (no normalization)
-    complex_fft(&mut z, m, true);
+    complex_fft_precomp(&mut z[..m], m, fft_tw);
 
-    // Step 3: Deinterleave real and imaginary into output
     for k in 0..m {
         output[2 * k] = z[k].re;
         output[2 * k + 1] = z[k].im;
@@ -215,18 +232,44 @@ fn real_fft_inverse(input: &[Complex<f64>], output: &mut [f64]) {
 // NeonFftEngine — only available on aarch64
 // ---------------------------------------------------------------------------
 
-/// FFT engine using a custom radix-2 DIT FFT with NEON-accelerated butterflies.
-/// Only available on `aarch64` targets.
+/// FFT engine using a custom radix-2 DIT FFT with NEON-accelerated butterflies
+/// and precomputed twiddle tables.
+///
+/// # Interior Mutability
+///
+/// Uses `UnsafeCell` for the internal working buffer `z_buf` to allow mutation
+/// through the `&self` interface required by the `FftEngine` trait.
+///
+/// ## Safety invariant
+///
+/// This is safe because `DwtSquarer` is single-threaded: `forward` and `inverse`
+/// are never called concurrently, and no reference to `z_buf` escapes these
+/// methods. The `Send` implementation is safe because the engine is never shared
+/// between threads (it is owned by a single `DwtSquarer`).
 #[cfg(target_arch = "aarch64")]
 pub struct NeonFftEngine {
     len: usize,
+    twiddles: TwiddleTable,
+    /// Working buffer for the N/2-point complex FFT.
+    /// Wrapped in `UnsafeCell` for interior mutability through `&self`.
+    z_buf: UnsafeCell<Vec<Complex<f64>>>,
 }
+
+/// SAFETY: `NeonFftEngine` is only used within a single-threaded `DwtSquarer`.
+/// The `UnsafeCell<Vec<Complex<f64>>>` is never accessed from multiple threads.
+#[cfg(target_arch = "aarch64")]
+unsafe impl Send for NeonFftEngine {}
 
 #[cfg(target_arch = "aarch64")]
 impl NeonFftEngine {
     pub fn new(len: usize) -> Self {
         assert!(len >= 4 && len.is_power_of_two(), "FFT length must be a power of 2 >= 4");
-        NeonFftEngine { len }
+        let half = len / 2;
+        NeonFftEngine {
+            len,
+            twiddles: TwiddleTable::new(half),
+            z_buf: UnsafeCell::new(vec![Complex::new(0.0, 0.0); half]),
+        }
     }
 }
 
@@ -235,13 +278,16 @@ impl crate::fft_engine::FftEngine for NeonFftEngine {
     fn forward(&self, input: &mut [f64], output: &mut [Complex<f64>], _scratch: &mut [Complex<f64>]) {
         debug_assert_eq!(input.len(), self.len);
         debug_assert_eq!(output.len(), self.len / 2 + 1);
-        real_fft_forward(input, output);
+        // SAFETY: see struct-level safety invariant documentation.
+        let z = unsafe { &mut *self.z_buf.get() };
+        real_fft_forward_precomp(input, output, z, &self.twiddles.forward, &self.twiddles.real_fwd);
     }
 
     fn inverse(&self, input: &mut [Complex<f64>], output: &mut [f64], _scratch: &mut [Complex<f64>]) {
         debug_assert_eq!(input.len(), self.len / 2 + 1);
         debug_assert_eq!(output.len(), self.len);
-        real_fft_inverse(input, output);
+        let z = unsafe { &mut *self.z_buf.get() };
+        real_fft_inverse_precomp(input, output, z, &self.twiddles.inverse, &self.twiddles.real_inv);
     }
 
     fn len(&self) -> usize { self.len }
@@ -266,8 +312,11 @@ mod tests {
             let mut real_scratch = vec![Complex::new(0.0, 0.0); real_engine.forward_scratch_len()];
             real_engine.forward(&mut real_input, &mut real_output, &mut real_scratch);
 
+            let half = n / 2;
+            let tw = TwiddleTable::new(half);
+            let mut z_buf = vec![Complex::new(0.0, 0.0); half];
             let mut custom_output = vec![Complex::new(0.0, 0.0); n / 2 + 1];
-            real_fft_forward(&input, &mut custom_output);
+            real_fft_forward_precomp(&input, &mut custom_output, &mut z_buf, &tw.forward, &tw.real_fwd);
 
             for k in 0..=n / 2 {
                 let diff_re = (real_output[k].re - custom_output[k].re).abs();
@@ -289,11 +338,14 @@ mod tests {
         for &n in &[4, 8, 16, 64, 256] {
             let original: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).sin()).collect();
 
+            let half = n / 2;
+            let tw = TwiddleTable::new(half);
+            let mut z_buf = vec![Complex::new(0.0, 0.0); half];
             let mut spectrum = vec![Complex::new(0.0, 0.0); n / 2 + 1];
             let mut output = vec![0.0f64; n];
 
-            real_fft_forward(&original, &mut spectrum);
-            real_fft_inverse(&spectrum, &mut output);
+            real_fft_forward_precomp(&original, &mut spectrum, &mut z_buf, &tw.forward, &tw.real_fwd);
+            real_fft_inverse_precomp(&spectrum, &mut output, &mut z_buf, &tw.inverse, &tw.real_inv);
 
             let inv_n = 1.0 / n as f64;
             for v in &mut output { *v *= inv_n; }
