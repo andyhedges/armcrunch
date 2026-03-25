@@ -68,6 +68,32 @@ pub struct DwtSquarer {
     zp_limbs: Vec<i64>,
 }
 
+/// Find the smallest even number ≥ `min` whose prime factors are all ≤ 5.
+/// These "5-smooth" (or "regular") numbers are optimal for FFT performance
+/// since rustfft has optimized radix-2, radix-3, and radix-5 kernels.
+/// The result is always even (required by realfft).
+fn smooth_fft_size(min: usize) -> usize {
+    let bound = min.next_power_of_two() * 2;
+    let mut candidates = Vec::new();
+    let mut a = 2;
+    while a <= bound {
+        let mut b = a;
+        while b <= bound {
+            let mut c = b;
+            while c <= bound {
+                if c >= min {
+                    candidates.push(c);
+                }
+                c *= 5;
+            }
+            b *= 3;
+        }
+        a *= 2;
+    }
+    candidates.sort_unstable();
+    candidates.into_iter().next().unwrap_or_else(|| min.next_power_of_two())
+}
+
 impl DwtSquarer {
     pub fn new(k: u64, exp: u64, x: &BigUint) -> Self {
         let modulus = BigUint::from(k) * (BigUint::from(1u64) << exp as usize) - 1u64;
@@ -84,8 +110,8 @@ impl DwtSquarer {
             loop {
                 let b_max = ((exp as usize + n - 1) / n) as f64;
                 let headroom = (53.0 - (n as f64).log2()) / 2.0;
-                if b_max <= headroom && n.is_power_of_two() { break n; }
-                n *= 2;
+                if b_max <= headroom { break n; }
+                n = smooth_fft_size(n + 1);
                 assert!(n <= (1 << 28), "FFT length overflow");
             }
         };
@@ -138,7 +164,7 @@ impl DwtSquarer {
     fn new_zero_padded(k: u64, exp: u64, modulus: &BigUint, x: &BigUint) -> Self {
         let m_bytes = (modulus.bits() as usize + 7) / 8;
         let n_limbs = (m_bytes + 1) / 2;
-        let fft_size = (2 * n_limbs).next_power_of_two();
+        let fft_size = smooth_fft_size(2 * n_limbs);
 
         let engine = Box::new(RealFftEngine::new(fft_size));
         let scratch_fwd = vec![Complex::new(0.0, 0.0); engine.forward_scratch_len()];
