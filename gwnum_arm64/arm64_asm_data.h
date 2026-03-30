@@ -176,7 +176,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 /* gwinfo/jmptab */
 const struct gwasm_jmptab *arm64_gwinfo1(int negacyclic);
-const struct gwasm_jmptab *gwinfo1(void);
+const char *arm64_gwinfo_backend_version(void);
 void arm64_install_gwprocptrs(void (**procptrs)(void *));
 
 #ifdef __cplusplus
