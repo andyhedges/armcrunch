@@ -172,11 +172,19 @@ echo "Copying cpuid replacement..."
 cp "$SCRIPT_DIR/arm64_cpuid.c" "$OUT_DIR/cpuid.c" 2>/dev/null || \
     echo "  Warning: arm64_cpuid.c not found at $SCRIPT_DIR, cpuid.c not replaced"
 
-echo "Copying other unmodified sources..."
-for f in gwtables.c gwthread.cpp gwini.c gwbench.c gwutil.c gwdbldbl.cpp giants.c radix.c; do
+echo "Copying and patching other sources..."
+for f in gwtables.c gwini.c gwbench.c gwutil.c gwdbldbl.cpp giants.c radix.c; do
     if [ -f "$GWNUM_SRC/$f" ]; then
         cp "$GWNUM_SRC/$f" "$OUT_DIR/$f"
     fi
 done
+
+# Patch gwthread.cpp: replace __builtin_ia32_pause() with ARM64 yield
+if [ -f "$GWNUM_SRC/gwthread.cpp" ]; then
+    sed \
+      -e 's/__builtin_ia32_pause();/__asm__ volatile("yield");/' \
+      "$GWNUM_SRC/gwthread.cpp" > "$OUT_DIR/gwthread.cpp"
+    echo "  Patched gwthread.cpp (ia32_pause -> yield)"
+fi
 
 echo "Done. Patched sources in $OUT_DIR"
