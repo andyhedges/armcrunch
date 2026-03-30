@@ -5,6 +5,15 @@
 #
 # This script reads the original gwnum sources and writes patched copies
 # to the output directory. The originals are not modified.
+#
+# Patches applied to gwnum.c:
+#   1. Add ARM64 includes and extern declarations after gwbench.h include
+#   2. Guard x86 assembly extern declarations (lines 113-440) with #if !ARM64
+#   3. Replace gwinfo1() call with arm64_gwinfo_hook() on ARM64
+#   4. Insert arm64_skip_version_check label before version sprintf
+#   5. Guard fpu_init() call
+#   6. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
+#   7. Guard pass1/pass2_aux_entry_point declarations
 
 set -euo pipefail
 
@@ -16,8 +25,10 @@ mkdir -p "$OUT_DIR"
 
 echo "Patching gwnum.c for ARM64..."
 
+# We apply patches via a Python script for more reliable multi-line editing
 python3 - "$GWNUM_SRC/gwnum.c" "$OUT_DIR/gwnum.c" << 'PYSCRIPT'
 import sys
+import re
 
 src_path = sys.argv[1]
 dst_path = sys.argv[2]
@@ -29,7 +40,9 @@ out = []
 i = 0
 n = len(lines)
 
+# State tracking
 in_x86_externs = False
+x86_extern_start = False
 gwprocptrs_else_open = False
 
 while i < n:
@@ -49,11 +62,6 @@ while i < n:
 
     # 2. Guard x86 assembly extern declarations block
     # Start: #define extern_decl(name)
-    # End: "/* Helper macros */" comment (the first line AFTER all prctab code)
-    # This covers: extern_decl macro, aux_decl macros, all prctab arrays,
-    # all explode macros, and all prctab_index functions.
-    # It does NOT cover: is_valid_double, GWINIT_WAS_CALLED_VALUE, GWFREEABLE,
-    # or the forward declarations of internal_gwsetup, multithread_init, etc.
     if line.startswith('#define extern_decl(name)') and not in_x86_externs:
         out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
         out.append(line)
@@ -61,16 +69,27 @@ while i < n:
         i += 1
         continue
 
+    # End: "/* Helper macros */" comment (after all prctab code)
     if in_x86_externs and '/* Helper macros */' in line:
         out.append('#endif /* !ARM64 - x86 assembly externs */\n')
+        out.append('\n')
+        # Add ARM64 no-op stubs for x86 assembly functions called from unguarded code
+        out.append('#if defined(ARM64) || defined(__aarch64__)\n')
+        out.append('/* ARM64 stubs for x86 assembly-only functions */\n')
+        out.append('static inline void gwz3_apply_carries(void *d) { (void)d; }\n')
+        out.append('static inline void gwy3_apply_carries(void *d) { (void)d; }\n')
+        out.append('static inline void prefetchL2(void *addr, int count) { (void)addr; (void)count; }\n')
+        out.append('static inline void pause_for_count(int count) { (void)count; }\n')
+        out.append('static inline void guessCpuSpeed(void) { }\n')
+        out.append('static inline void fpu_init(void) { }\n')
+        out.append('#endif\n')
         out.append('\n')
         out.append(line)
         in_x86_externs = False
         i += 1
         continue
 
-    # 3. Guard the original gwinfo1 declaration and provide ARM64 stubs
-    # for pass1/pass2_aux_entry_point (which are x86 assembly in the original)
+    # 3. Guard the original gwinfo1 declaration
     if line.strip().startswith('void gwinfo1 (struct gwinfo1_data'):
         out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
         out.append(line)
@@ -78,13 +97,19 @@ while i < n:
         i += 1
         continue
 
-    # Guard pass1_aux_entry_point and pass2_aux_entry_point forward declarations
-    # and provide no-op stubs on ARM64 (the ARM64 backend doesn't use these)
+    # 3b. Guard prefetchL2 and pause_for_count declarations (they get ARM64 stubs above)
+    if line.strip().startswith('void prefetchL2 (') or line.strip().startswith('void pause_for_count ('):
+        out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
+        out.append(line)
+        out.append('#endif\n')
+        i += 1
+        continue
+
+    # 3c. Guard pass1_aux_entry_point and pass2_aux_entry_point forward declarations
     if line.strip().startswith('void pass1_aux_entry_point'):
         out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
         out.append(line)
         i += 1
-        # Also grab pass2_aux_entry_point on the next line
         if i < n and 'pass2_aux_entry_point' in lines[i]:
             out.append(lines[i])
             i += 1
@@ -116,7 +141,8 @@ while i < n:
         i += 1
         continue
 
-    # 6. Guard fpu_init()
+    # 6. Guard fpu_init() call (the stub is defined above, but guard the call too
+    # to avoid "static function defined but not used" warnings on x86)
     if 'fpu_init ()' in line and '#' not in line:
         out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
         out.append(line)
