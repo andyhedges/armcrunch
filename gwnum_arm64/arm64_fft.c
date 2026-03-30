@@ -283,6 +283,8 @@ static void arm64_forward_fft(double *data, size_t n) {
 	for (; m <= n; m *= 4u) {
 		arm64_forward_radix4_stage(data, n, m);
 	}
+
+	arm64_bit_reverse_permute(data, n);
 }
 
 static void arm64_inverse_fft(double *data, size_t n) {
@@ -292,6 +294,8 @@ static void arm64_inverse_fft(double *data, size_t n) {
 	if (data == NULL) return;
 	if (n < 2u) return;
 	if (!arm64_is_power_of_two(n)) return;
+
+	arm64_bit_reverse_permute(data, n);
 
 	log2_n = arm64_log2_u32((uint32_t)n);
 
