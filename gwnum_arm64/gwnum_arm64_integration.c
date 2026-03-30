@@ -111,7 +111,7 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 	gwdata->FFTLEN = fftlen;
 	gwdata->PASS2_SIZE = 0;
 	gwdata->PASS1_SIZE = 0;
-	gwdata->FFT_TYPE = FFT_TYPE_RADIX_4;
+	gwdata->FFT_TYPE = FFT_TYPE_HOME_GROWN;
 	gwdata->ARCH = 0;
 	gwdata->NO_PREFETCH_FFT = 0;
 	gwdata->IN_PLACE_FFT = 0;
