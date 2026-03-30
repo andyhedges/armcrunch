@@ -4,6 +4,23 @@
 #include <math.h>
 #include <stddef.h>
 
+static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
+	if (ad != NULL && ad->gwdata != NULL) {
+		return (size_t)addr_offset(ad->gwdata, (unsigned long)word);
+	}
+	return word * sizeof(double);
+}
+
+static inline double arm64_load_scrambled_word(const struct gwasm_data *ad, const double *buffer, size_t word) {
+	const char *ptr = (const char *)buffer + arm64_word_offset_bytes(ad, word);
+	return *(const double *)ptr;
+}
+
+static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, double *buffer, size_t word, double value) {
+	char *ptr = (char *)buffer + arm64_word_offset_bytes(ad, word);
+	*(double *)ptr = value;
+}
+
 static double arm64_carry_quotient(double value, double base, double inv_base) {
 	if (base == 0.0) return 0.0;
 	if (value >= 0.0) return floor(value * inv_base);
@@ -12,7 +29,6 @@ static double arm64_carry_quotient(double value, double base, double inv_base) {
 
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
 	struct gwasm_data *ad = asm_data;
-	size_t complex_len;
 	size_t words;
 	size_t word;
 	double carry = 0.0;
@@ -24,9 +40,8 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 	if (ad == NULL || buffer == NULL) return;
 
-	complex_len = arm64_complex_len(ad);
-	if (complex_len == 0) return;
-	words = complex_len * 2u;
+	words = arm64_data_words(ad);
+	if (words == 0) return;
 
 	maxerr = ad->MAXERR;
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
@@ -35,17 +50,16 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	carries = (double *)ad->carries;
 
 	for (word = 0; word < words; ++word) {
-		size_t complex_index = word >> 1u;
 		int big_word = arm64_is_big_word(ad, word);
 		double base = arm64_word_base(ad, big_word);
 		double inv_base = arm64_word_base_inverse(ad, big_word);
 		double limit = arm64_word_limit(ad, big_word);
-		double value = buffer[word];
+		double value = arm64_load_scrambled_word(ad, buffer, word);
 		double rounded;
 		double carry_out = 0.0;
 
-		/* Undo IBDWT weight (inverse weight table). */
-		value *= arm64_inverse_weight_at(ad, complex_index);
+		/* Undo IBDWT weight for this logical word. */
+		value *= arm64_inverse_weight_at(ad, word);
 
 		if (use_mulconst) value *= mulconst;
 
@@ -69,7 +83,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		}
 
 		carry = carry_out;
-		buffer[word] = rounded;
+		arm64_store_scrambled_word(ad, buffer, word, rounded);
 
 		if (carries != NULL) {
 			carries[word] = carry;
@@ -77,7 +91,8 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	}
 
 	if (carry != 0.0) {
-		buffer[0] += carry;
+		double wrapped = arm64_load_scrambled_word(ad, buffer, 0u) + carry;
+		arm64_store_scrambled_word(ad, buffer, 0u, wrapped);
 		if (carries != NULL) carries[0] += carry;
 	}
 

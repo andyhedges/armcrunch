@@ -44,13 +44,16 @@ extern arm64_asm_constants *arm64_active_asm_constants;
 #define ARM64_DEFAULT_LARGE_BASE	268435456.0
 #define ARM64_DEFAULT_BIGVAL		6755399441055744.0	/* 3.0 * 2^51 */
 
+/*
+ * In gwnum data format FFTLEN is the total count of real doubles stored for one value.
+ */
 static inline size_t arm64_complex_len(const struct gwasm_data *ad) {
 	if (ad == NULL) return 0;
 	return (size_t)ad->FFTLEN;
 }
 
 static inline size_t arm64_data_words(const struct gwasm_data *ad) {
-	return arm64_complex_len(ad) * 2u;
+	return arm64_complex_len(ad);
 }
 
 static inline double *arm64_fftsrc_ptr(const struct gwasm_data *ad) {
@@ -134,7 +137,7 @@ static inline double arm64_mulconst(const struct gwasm_data *ad) {
 	return 1.0;
 }
 
-static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t complex_index) {
+static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t word_index) {
 	size_t fftlen;
 	const arm64_asm_constants *ac;
 	unsigned long n_exp;
@@ -159,7 +162,7 @@ static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t
 	else if (ac != NULL && ac->NEON_B > 0.0 && ac->NEON_B != 1.0) base = ac->NEON_B;
 	else return 1.0;
 
-	j = complex_index % fftlen;
+	j = word_index % fftlen;
 	n_mod = n_exp % (unsigned long)fftlen;
 
 #if defined(__SIZEOF_INT128__)
@@ -175,8 +178,8 @@ static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t
 	return 1.0 / weight;
 }
 
-static inline double arm64_forward_weight_at(const struct gwasm_data *ad, size_t complex_index) {
-	double inv_weight = arm64_inverse_weight_at(ad, complex_index);
+static inline double arm64_forward_weight_at(const struct gwasm_data *ad, size_t word_index) {
+	double inv_weight = arm64_inverse_weight_at(ad, word_index);
 	return inv_weight == 0.0 ? 1.0 : 1.0 / inv_weight;
 }
 
