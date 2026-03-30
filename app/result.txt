@@ -1,3 +1,0 @@
-1007*2^83036-1 is not prime. RES64: AE2DD213074E11E9, time: 2 s.
-1007*2^83036-1 is not prime. RES64: AE2DD213074E11E9, time: 2 s.
-1007*2^83036-1 is not prime. RES64: AE2DD213074E11E9, time: 2 s.
