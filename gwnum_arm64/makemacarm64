@@ -12,12 +12,17 @@ AR      = ar
 RANLIB  = ranlib
 
 GWNUM_SRC  ?= ../reference/prime95/gwnum
+GWNUM_PARENT = $(GWNUM_SRC)/..
 ARM64_SRC  ?= .
 BUILD_DIR  ?= build/macarm64
 PATCHED_DIR = $(BUILD_DIR)/patched
 
-CFLAGS   = -arch arm64 -O2 -std=gnu99 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR)
-CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR)
+CFLAGS   = -arch arm64 -O2 -std=gnu99 -DARM64 -Wno-unused-result \
+           -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR) \
+           -I$(GWNUM_PARENT) -I$(GWNUM_PARENT)/sqlite-amalgamation-3420000
+CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 \
+           -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR) \
+           -I$(GWNUM_PARENT) -I$(GWNUM_PARENT)/qd
 
 LIB = gwnum.a
 
