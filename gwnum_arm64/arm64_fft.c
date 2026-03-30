@@ -328,8 +328,7 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 static int arm64_pack_scrambled_to_complex(
 	const struct gwasm_data *ad,
 	const double *src,
-	double *dst_complex,
-	int apply_weights)
+	double *dst_complex)
 {
 	size_t words;
 	size_t half;
@@ -345,11 +344,6 @@ static int arm64_pack_scrambled_to_complex(
 		size_t imag_word = k + half;
 		double re = arm64_load_scrambled_word(ad, src, k);
 		double im = arm64_load_scrambled_word(ad, src, imag_word);
-
-		if (apply_weights) {
-			re *= arm64_forward_weight_at(ad, k);
-			im *= arm64_forward_weight_at(ad, imag_word);
-		}
 
 		dst_complex[2u * k] = re;
 		dst_complex[2u * k + 1u] = im;
@@ -501,15 +495,15 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	}
 
 	switch (ffttype) {
-	case 1:	/* forward FFT only (s1 is time-domain, apply forward weights) */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1, 1);
+	case 1:	/* forward FFT only (s1 is time-domain) */
+		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
 		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		break;
 
 	case 2:	/* forward + square + inverse + normalize */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1, 1);
+		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
 		arm64_pointwise_square(tmp1, tmp1, complex_len);
@@ -520,9 +514,9 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		break;
 
 	case 3:	/* forward s1 + mul by already-FFTed s2 + inverse + normalize */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1, 1);
+		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
-		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2, 0);
+		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
 		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
@@ -533,9 +527,9 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		break;
 
 	case 4:	/* mul two already-FFTed operands + inverse + normalize */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1, 0);
+		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
-		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2, 0);
+		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
 		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
 		arm64_inverse_fft(tmp1, complex_len);
@@ -545,7 +539,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		break;
 
 	case 5:	/* inverse + normalize only (input already FFTed) */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1, 0);
+		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_inverse_fft(tmp1, complex_len);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
@@ -554,7 +548,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		break;
 
 	default:
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1, 1);
+		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
 		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
