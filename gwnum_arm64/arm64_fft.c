@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #if defined(__aarch64__) || defined(ARM64)
@@ -445,6 +446,7 @@ static void arm64_normalize(struct gwasm_data *asm_data) {
 }
 
 void arm64_fft_entry(struct gwasm_data *asm_data) {
+	static int debug_count = 0;
 	struct gwasm_data *ad = asm_data;
 	double *dest;
 	double *s1;
@@ -464,6 +466,39 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	if (words == 0u || (words & 1u) != 0u) return;
 
 	complex_len = words / 2u;
+
+	if (debug_count < 3) {
+		size_t i;
+		fprintf(stderr, "[ARM64 FFT] call #%d ffttype=%d FFTLEN=%u words=%zu complex_len=%zu\n",
+			debug_count, (int)(unsigned char)ad->ffttype, ad->FFTLEN, words, complex_len);
+		if (ad->gwdata) {
+			fprintf(stderr, "[ARM64 FFT] FOURKBGAPSIZE=%ld RATIONAL=%d B_IS_2=%d\n",
+				(long)ad->gwdata->FOURKBGAPSIZE, (int)ad->RATIONAL_FFT, (int)ad->B_IS_2);
+		}
+		fprintf(stderr, "[ARM64 FFT] Raw doubles[0..7]: ");
+		for (i = 0; i < 8 && i < words; i++)
+			fprintf(stderr, "%.6g ", dest[i]);
+		fprintf(stderr, "\n");
+		fprintf(stderr, "[ARM64 FFT] Scrambled words[0..7]: ");
+		for (i = 0; i < 8 && i < words; i++)
+			fprintf(stderr, "%.6g ", arm64_load_scrambled_word(ad, dest, i));
+		fprintf(stderr, "\n");
+		if (ad->gwdata) {
+			fprintf(stderr, "[ARM64 FFT] addr_offset[0..7]: ");
+			for (i = 0; i < 8 && i < words; i++)
+				fprintf(stderr, "%lu ", addr_offset(ad->gwdata, (unsigned long)i));
+			fprintf(stderr, "\n");
+		}
+		fprintf(stderr, "[ARM64 FFT] fwd_weight[0..3]: ");
+		for (i = 0; i < 4; i++)
+			fprintf(stderr, "%.10g ", arm64_forward_weight_at(ad, i));
+		fprintf(stderr, "\n");
+		fprintf(stderr, "[ARM64 FFT] inv_weight[0..3]: ");
+		for (i = 0; i < 4; i++)
+			fprintf(stderr, "%.10g ", arm64_inverse_weight_at(ad, i));
+		fprintf(stderr, "\n");
+		debug_count++;
+	}
 	if (!arm64_is_power_of_two(complex_len)) return;
 
 	s1 = arm64_fftsrc_ptr(ad);
