@@ -593,22 +593,22 @@ Computation, January 1994) to square numbers mod 2^p - 1.
 COPYRIGHTS (hwloc library)
 --------------------------
 
-Copyright © 2004-2006 The Trustees of Indiana University and Indiana University Research and Technology Corporation.  All rights reserved.
-Copyright © 2004-2005 The University of Tennessee and The University of Tennessee Research Foundation.  All rights reserved.
-Copyright © 2004-2005 High Performance Computing Center Stuttgart, University of Stuttgart.  All rights reserved.
-Copyright © 2004-2005 The Regents of the University of California. All rights reserved.
-Copyright © 2009      CNRS
-Copyright © 2009-2016 Inria.  All rights reserved.
-Copyright © 2009-2015 Université Bordeaux
-Copyright © 2009-2015 Cisco Systems, Inc.  All rights reserved.
-Copyright © 2009-2012 Oracle and/or its affiliates.  All rights reserved.
-Copyright © 2010      IBM
-Copyright © 2010      Jirka Hladky
-Copyright © 2012      Aleksej Saushev, The NetBSD Foundation
-Copyright © 2012      Blue Brain Project, EPFL. All rights reserved.
-Copyright © 2013-2014 University of Wisconsin-La Crosse. All rights reserved.
-Copyright © 2015      Research Organization for Information Science and Technology (RIST). All rights reserved.
-Copyright © 2015-2016 Intel, Inc.  All rights reserved.
+Copyright ï¿½ 2004-2006 The Trustees of Indiana University and Indiana University Research and Technology Corporation.  All rights reserved.
+Copyright ï¿½ 2004-2005 The University of Tennessee and The University of Tennessee Research Foundation.  All rights reserved.
+Copyright ï¿½ 2004-2005 High Performance Computing Center Stuttgart, University of Stuttgart.  All rights reserved.
+Copyright ï¿½ 2004-2005 The Regents of the University of California. All rights reserved.
+Copyright ï¿½ 2009      CNRS
+Copyright ï¿½ 2009-2016 Inria.  All rights reserved.
+Copyright ï¿½ 2009-2015 Universitï¿½ Bordeaux
+Copyright ï¿½ 2009-2015 Cisco Systems, Inc.  All rights reserved.
+Copyright ï¿½ 2009-2012 Oracle and/or its affiliates.  All rights reserved.
+Copyright ï¿½ 2010      IBM
+Copyright ï¿½ 2010      Jirka Hladky
+Copyright ï¿½ 2012      Aleksej Saushev, The NetBSD Foundation
+Copyright ï¿½ 2012      Blue Brain Project, EPFL. All rights reserved.
+Copyright ï¿½ 2013-2014 University of Wisconsin-La Crosse. All rights reserved.
+Copyright ï¿½ 2015      Research Organization for Information Science and Technology (RIST). All rights reserved.
+Copyright ï¿½ 2015-2016 Intel, Inc.  All rights reserved.
 
 THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
 IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES

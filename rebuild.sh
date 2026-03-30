@@ -55,6 +55,9 @@ cp gwnum.a ~/code/prst/framework/gwnum/macarm64/
 cd ~/code/prst/src/macarm64
 make clean
 
+# Remove leftover logging.h from previous build attempts
+rm -f logging.h
+
 # Patch framework's logging.h in-place to handle missing params gracefully.
 # Save backup first, then restore after build.
 # PRST's Progress::param_double/param_int call std::stod/stoi on potentially
