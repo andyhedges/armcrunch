@@ -9,10 +9,9 @@
 # Patches applied to gwnum.c:
 #   1. Add ARM64 includes and extern declarations after gwbench.h include
 #   2. Guard x86 assembly extern declarations (lines 113-440) with #if !ARM64
-#   3. Replace gwinfo1() call with arm64_gwinfo_hook() on ARM64
-#   4. Insert arm64_skip_version_check label before version sprintf
-#   5. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
-#   6. Guard pass1/pass2_aux_entry_point declarations
+#   3. Replace gwinfo1() call with arm64_gwinfo_hook() that returns immediately on ARM64
+#   4. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
+#   5. Guard pass1/pass2_aux_entry_point declarations
 
 set -euo pipefail
 
@@ -53,7 +52,7 @@ while i < n:
         out.append('\n')
         out.append('#if defined(ARM64) || defined(__aarch64__)\n')
         out.append('#include "arm64_asm_data.h"\n')
-        out.append('extern const struct gwasm_jmptab *arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic);\n')
+        out.append('extern int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic);\n')
         out.append('extern void arm64_gwsetup_hook(gwhandle *gwdata);\n')
         out.append('#endif\n')
         i += 1
@@ -116,29 +115,20 @@ while i < n:
         out.append('#endif\n')
         continue
 
-    # 4. Replace gwinfo1(&asm_info) call with ARM64 hook
+    # 4. Replace gwinfo1(&asm_info) call with ARM64 hook that returns immediately
     if 'gwinfo1 (&asm_info);' in line and 'gwinfo1' in line:
         indent = line[:len(line) - len(line.lstrip())]
         out.append('#if defined(ARM64) || defined(__aarch64__)\n')
-        out.append(indent + '{ const struct gwasm_jmptab *arm64_tab = arm64_gwinfo_hook(gwdata, gwdata->NEGACYCLIC_FFT);\n')
-        out.append(indent + '  if (arm64_tab == NULL) return (GWERROR_VERSION);\n')
-        out.append(indent + '  jmptab = arm64_tab; goto arm64_skip_version_check; }\n')
+        out.append(indent + '{ int arm64_rc = arm64_gwinfo_hook(gwdata, gwdata->NEGACYCLIC_FFT);\n')
+        out.append(indent + '  if (arm64_rc) return arm64_rc;\n')
+        out.append(indent + '  return 0; }\n')
         out.append('#else\n')
         out.append(line)
         out.append('#endif\n')
         i += 1
         continue
 
-    # 5. Insert arm64_skip_version_check label before version sprintf
-    if 'sprintf (buf, "%d.%d", asm_info.version' in line:
-        out.append('#if defined(ARM64) || defined(__aarch64__)\n')
-        out.append('arm64_skip_version_check:;\n')
-        out.append('#endif\n')
-        out.append(line)
-        i += 1
-        continue
-
-    # 6. Insert arm64_gwsetup_hook before x86 GWPROCPTRS assignment block
+    # 5. Insert arm64_gwsetup_hook before x86 GWPROCPTRS assignment block
     if '/* Set the procedure pointers from the proc tables */' in line:
         out.append(line)
         out.append('\n')
