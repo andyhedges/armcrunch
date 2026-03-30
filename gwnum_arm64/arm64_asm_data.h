@@ -147,8 +147,7 @@ static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t
 		inv_weight *= col_mults[complex_index % n];
 	}
 	if (grp_mults != NULL) {
-		size_t group_span = ad->PASS2_SIZE != 0 ? (size_t)ad->PASS2_SIZE : n;
-		size_t group_index = group_span != 0 ? (complex_index / group_span) : 0;
+		size_t group_index = 0;
 		inv_weight *= grp_mults[group_index];
 	}
 	if (inv_weight == 0.0) return 1.0;

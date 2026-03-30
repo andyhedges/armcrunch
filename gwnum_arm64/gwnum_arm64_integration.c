@@ -169,8 +169,6 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 
 	/* Keep core setup fields synchronized with gwdata. */
 	ad->FFTLEN = (uint32_t)gwdata->FFTLEN;
-	ad->PASS1_SIZE = (uint32_t)gwdata->PASS1_SIZE;
-	ad->PASS2_SIZE = (uint32_t)gwdata->PASS2_SIZE;
 	ad->const_fft = 0;
 	ad->ADDIN_VALUE = gwdata->asm_addin_value;
 	ad->POSTADDIN_VALUE = gwdata->asm_postaddin_value;
