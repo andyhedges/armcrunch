@@ -1,4 +1,5 @@
 #include "arm64_asm_data.h"
+#include "gwtables.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -100,7 +101,7 @@ static void arm64_bit_reverse_permute(double *data, size_t n) {
 }
 
 static arm64_complex arm64_twiddle(
-	const arm64_gwasm_data_view *ad,
+	const struct gwasm_data *ad,
 	unsigned tw_mul,
 	size_t j,
 	size_t m,
@@ -108,11 +109,13 @@ static arm64_complex arm64_twiddle(
 {
 	const double *table = NULL;
 
-	if (tw_mul == 1u) table = ad->sincos1;
-	else if (tw_mul == 2u) table = ad->sincos2;
-	else table = ad->sincos3;
+	if (ad != NULL) {
+		if (tw_mul == 1u) table = (const double *)ad->sincos1;
+		else if (tw_mul == 2u) table = (const double *)ad->sincos2;
+		else table = (const double *)ad->sincos3;
+	}
 
-	if (table != NULL) {
+	if (table != NULL && ad != NULL) {
 		size_t n = arm64_complex_len(ad);
 		size_t period = n != 0 ? n : m;
 		size_t idx = period != 0 ? ((j * (size_t)tw_mul) % period) : 0;
@@ -132,7 +135,8 @@ static arm64_complex arm64_twiddle(
 	}
 }
 
-static void arm64_apply_ibdwt_preweights(const arm64_gwasm_data_view *ad, double *data, size_t n) {
+static void arm64_apply_ibdwt_preweights(const struct gwasm_data *ad, double *data, size_t n) {
+	if (ad == NULL) return;
 	if (ad->norm_col_mults == NULL && ad->norm_grp_mults == NULL) return;
 
 #if defined(__aarch64__) || defined(ARM64)
@@ -170,7 +174,7 @@ static void arm64_apply_ibdwt_preweights(const arm64_gwasm_data_view *ad, double
 #endif
 }
 
-static void arm64_forward_radix2_stage(const arm64_gwasm_data_view *ad, double *data, size_t n, size_t m) {
+static void arm64_forward_radix2_stage(const struct gwasm_data *ad, double *data, size_t n, size_t m) {
 	size_t half = m / 2u;
 	size_t k;
 
@@ -190,7 +194,7 @@ static void arm64_forward_radix2_stage(const arm64_gwasm_data_view *ad, double *
 	}
 }
 
-static void arm64_forward_radix4_stage(const arm64_gwasm_data_view *ad, double *data, size_t n, size_t m) {
+static void arm64_forward_radix4_stage(const struct gwasm_data *ad, double *data, size_t n, size_t m) {
 	size_t quarter = m / 4u;
 	size_t k;
 
@@ -246,7 +250,7 @@ static void arm64_inverse_radix2_final_stage(double *data, size_t n) {
 	}
 }
 
-static void arm64_inverse_radix4_stage(const arm64_gwasm_data_view *ad, double *data, size_t n, size_t m) {
+static void arm64_inverse_radix4_stage(const struct gwasm_data *ad, double *data, size_t n, size_t m) {
 	size_t quarter = m / 4u;
 	size_t k;
 	(void)n;
@@ -311,11 +315,13 @@ static void arm64_scale_inverse(double *data, size_t complex_len) {
 #endif
 }
 
-static void arm64_forward_fft(const arm64_gwasm_data_view *ad, double *data) {
-	size_t n = arm64_complex_len(ad);
+static void arm64_forward_fft(const struct gwasm_data *ad, double *data) {
+	size_t n;
 	int log2_n;
 	size_t m;
 
+	if (ad == NULL) return;
+	n = arm64_complex_len(ad);
 	if (n < 2u) return;
 	if ((n & (n - 1u)) != 0u) return;	/* power-of-two only */
 
@@ -336,11 +342,13 @@ static void arm64_forward_fft(const arm64_gwasm_data_view *ad, double *data) {
 	}
 }
 
-static void arm64_inverse_fft(const arm64_gwasm_data_view *ad, double *data) {
-	size_t n = arm64_complex_len(ad);
+static void arm64_inverse_fft(const struct gwasm_data *ad, double *data) {
+	size_t n;
 	int log2_n;
 	size_t m;
 
+	if (ad == NULL) return;
+	n = arm64_complex_len(ad);
 	if (n < 2u) return;
 	if ((n & (n - 1u)) != 0u) return;
 
@@ -415,16 +423,16 @@ static void arm64_pointwise_square(double *dst, const double *src, size_t comple
 }
 
 static void arm64_normalize(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	if (ad != NULL && ad->NORMRTN != NULL) {
-		ad->NORMRTN(asm_data);
+		((void (*)(struct gwasm_data *))ad->NORMRTN)(asm_data);
 	} else {
 		arm64_norm_plain(asm_data);
 	}
 }
 
 void arm64_fft_entry(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *dest;
 	double *s1;
 	double *s2;
@@ -432,7 +440,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	size_t words;
 
 	if (ad == NULL) return;
-	dest = ad->DESTARG;
+	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
 
 	s1 = arm64_fftsrc_ptr(ad);
@@ -445,7 +453,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	words = arm64_data_words(ad);
 	if (words == 0) words = n * 2u;
 
-	switch (ad->ffttype) {
+	switch ((unsigned int)(unsigned char)ad->ffttype) {
 	case 1:	/* forward FFT only */
 		if (dest != s1) memmove(dest, s1, words * sizeof(double));
 		arm64_forward_fft(ad, dest);

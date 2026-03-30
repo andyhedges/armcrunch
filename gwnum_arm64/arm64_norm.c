@@ -1,4 +1,5 @@
 #include "arm64_asm_data.h"
+#include "gwtables.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -10,7 +11,7 @@ static double arm64_carry_quotient(double value, double base, double inv_base) {
 }
 
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	size_t complex_len;
 	size_t words;
 	size_t word;
@@ -19,6 +20,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	int use_mulconst;
 	double mulconst;
 	size_t addin_offset;
+	double *carries;
 
 	if (ad == NULL || buffer == NULL) return;
 
@@ -30,6 +32,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
 	addin_offset = (size_t)ad->ADDIN_OFFSET;
+	carries = (double *)ad->carries;
 
 	for (word = 0; word < words; ++word) {
 		size_t complex_index = word >> 1u;
@@ -68,42 +71,56 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		carry = carry_out;
 		buffer[word] = rounded;
 
-		if (ad->carries != NULL) {
-			ad->carries[word] = carry;
+		if (carries != NULL) {
+			carries[word] = carry;
 		}
 	}
 
 	if (carry != 0.0) {
 		buffer[0] += carry;
-		if (ad->carries != NULL) ad->carries[0] += carry;
+		if (carries != NULL) carries[0] += carry;
 	}
 
 	if (errchk && maxerr > ad->MAXERR) {
 		ad->MAXERR = maxerr;
-		ad->arm64.NEON_MAXERR = maxerr;
+		if (arm64_active_asm_constants != NULL) {
+			arm64_active_asm_constants->NEON_MAXERR = maxerr;
+		}
 	}
 }
 
 void arm64_norm_plain(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
-	if (ad == NULL || ad->DESTARG == NULL) return;
-	arm64_normalize_buffer(asm_data, ad->DESTARG, 0, 0);
+	struct gwasm_data *ad = asm_data;
+	double *dest;
+	if (ad == NULL) return;
+	dest = (double *)ad->DESTARG;
+	if (dest == NULL) return;
+	arm64_normalize_buffer(asm_data, dest, 0, 0);
 }
 
 void arm64_norm_errchk(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
-	if (ad == NULL || ad->DESTARG == NULL) return;
-	arm64_normalize_buffer(asm_data, ad->DESTARG, 1, 0);
+	struct gwasm_data *ad = asm_data;
+	double *dest;
+	if (ad == NULL) return;
+	dest = (double *)ad->DESTARG;
+	if (dest == NULL) return;
+	arm64_normalize_buffer(asm_data, dest, 1, 0);
 }
 
 void arm64_norm_mulconst(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
-	if (ad == NULL || ad->DESTARG == NULL) return;
-	arm64_normalize_buffer(asm_data, ad->DESTARG, 0, 1);
+	struct gwasm_data *ad = asm_data;
+	double *dest;
+	if (ad == NULL) return;
+	dest = (double *)ad->DESTARG;
+	if (dest == NULL) return;
+	arm64_normalize_buffer(asm_data, dest, 0, 1);
 }
 
 void arm64_norm_errchk_mulconst(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
-	if (ad == NULL || ad->DESTARG == NULL) return;
-	arm64_normalize_buffer(asm_data, ad->DESTARG, 1, 1);
+	struct gwasm_data *ad = asm_data;
+	double *dest;
+	if (ad == NULL) return;
+	dest = (double *)ad->DESTARG;
+	if (dest == NULL) return;
+	arm64_normalize_buffer(asm_data, dest, 1, 1);
 }

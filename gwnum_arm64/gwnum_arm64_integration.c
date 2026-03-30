@@ -20,10 +20,15 @@
 #include <string.h>
 #include <stdint.h>
 #include "gwnum.h"
+#include "gwtables.h"
 #include "arm64_asm_data.h"
 
 /* ARM64 one-pass FFT sizes we support */
 static const uint32_t arm64_fft_sizes[] = { 1024, 2048, 4096, 8192, 16384, 32768, 0 };
+
+/* Active ARM64 normalization constants block used by backend routines. */
+static arm64_asm_constants arm64_constants_storage;
+arm64_asm_constants *arm64_active_asm_constants = NULL;
 
 /* Bits per FFT word for our ARM64 radix-4 implementation */
 static double arm64_bits_per_word(uint32_t fftlen, int negacyclic) {
@@ -151,24 +156,42 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 
 void arm64_gwsetup_hook(gwhandle *gwdata)
 {
-	arm64_gwasm_data_view *ad;
+	struct gwasm_data *ad;
+	arm64_asm_constants *ac;
+	double small_word = 0.0;
+	double big_word = 0.0;
 
 	if (gwdata == NULL || gwdata->asm_data == NULL) return;
 
 	arm64_install_gwprocptrs(gwdata->GWPROCPTRS);
 
-	ad = (arm64_gwasm_data_view *)gwdata->asm_data;
+	ad = (struct gwasm_data *)gwdata->asm_data;
 
-	ad->FFTLEN     = (uint32_t)gwdata->FFTLEN;
+	/* Keep core setup fields synchronized with gwdata. */
+	ad->FFTLEN = (uint32_t)gwdata->FFTLEN;
 	ad->PASS1_SIZE = (uint32_t)gwdata->PASS1_SIZE;
 	ad->PASS2_SIZE = (uint32_t)gwdata->PASS2_SIZE;
-	ad->const_fft  = 0;
-	ad->ADDIN_VALUE    = gwdata->asm_addin_value;
+	ad->const_fft = 0;
+	ad->ADDIN_VALUE = gwdata->asm_addin_value;
 	ad->POSTADDIN_VALUE = gwdata->asm_postaddin_value;
 
-	{
-		double big_word, small_word;
+	ac = &arm64_constants_storage;
+	memset(ac, 0, sizeof(*ac));
+	arm64_active_asm_constants = ac;
 
+	/* Values precomputed by SSE2 table-building path in internal_gwsetup(). */
+	ac->NEON_BIGVAL = ad->u.xmm.XMM_BIGVAL[0];
+	if (ac->NEON_BIGVAL == 0.0) ac->NEON_BIGVAL = ARM64_DEFAULT_BIGVAL;
+
+	ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] = ad->u.xmm.XMM_LIMIT_INVERSE[0];
+	ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG]   = ad->u.xmm.XMM_LIMIT_INVERSE[1];
+
+	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] != 0.0)
+		small_word = 1.0 / ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL];
+	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG] != 0.0)
+		big_word = 1.0 / ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG];
+
+	if (small_word == 0.0 || big_word == 0.0) {
 		if (gwdata->b == 2) {
 			small_word = ldexp(1.0, (int)gwdata->NUM_B_PER_SMALL_WORD);
 			big_word   = small_word * 2.0;
@@ -176,33 +199,58 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 			small_word = pow((double)gwdata->b, (double)gwdata->NUM_B_PER_SMALL_WORD);
 			big_word   = small_word * (double)gwdata->b;
 		}
-
-		ad->arm64.NEON_LARGE_BASE     = big_word;
-		ad->arm64.NEON_SMALL_BASE     = small_word;
-		ad->arm64.NEON_LARGE_BASE_INV = 1.0 / big_word;
-		ad->arm64.NEON_SMALL_BASE_INV = 1.0 / small_word;
-		ad->arm64.NEON_BIGVAL = 3.0 * ldexp(1.0, 51);
-		ad->arm64.NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] = 1.0 / small_word;
-		ad->arm64.NEON_LIMIT_INVERSE[ARM64_WORD_BIG]   = 1.0 / big_word;
-		ad->arm64.NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL]  = small_word * ad->arm64.NEON_BIGVAL - ad->arm64.NEON_BIGVAL;
-		ad->arm64.NEON_LIMIT_BIGMAX[ARM64_WORD_BIG]    = big_word   * ad->arm64.NEON_BIGVAL - ad->arm64.NEON_BIGVAL;
 	}
 
-	{
+	ac->NEON_SMALL_BASE = small_word;
+	ac->NEON_LARGE_BASE = big_word;
+	ac->NEON_SMALL_BASE_INV = (small_word != 0.0) ? (1.0 / small_word) : 0.0;
+	ac->NEON_LARGE_BASE_INV = (big_word != 0.0) ? (1.0 / big_word) : 0.0;
+
+	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] == 0.0)
+		ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] = ac->NEON_SMALL_BASE_INV;
+	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG] == 0.0)
+		ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG] = ac->NEON_LARGE_BASE_INV;
+
+	ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] = ad->u.xmm.XMM_LIMIT_BIGMAX[0];
+	ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG]   = ad->u.xmm.XMM_LIMIT_BIGMAX[1];
+
+	if (ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] == 0.0)
+		ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] = ac->NEON_SMALL_BASE * ac->NEON_BIGVAL - ac->NEON_BIGVAL;
+	if (ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG] == 0.0)
+		ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG] = ac->NEON_LARGE_BASE * ac->NEON_BIGVAL - ac->NEON_BIGVAL;
+
+	ac->NEON_K_HI = ad->u.xmm.XMM_K_HI[0];
+	ac->NEON_K_LO = ad->u.xmm.XMM_K_LO[0];
+	if (ac->NEON_K_HI == 0.0 && ac->NEON_K_LO == 0.0) {
 		double k_hi = floor(gwdata->k / 4294967296.0) * 4294967296.0;
-		ad->arm64.NEON_K_HI      = k_hi;
-		ad->arm64.NEON_K_LO      = gwdata->k - k_hi;
-		ad->arm64.NEON_MINUS_C   = (double)(-gwdata->c);
-		ad->arm64.NEON_MULCONST  = (double)gwdata->mulbyconst;
-		ad->arm64.NEON_B         = (double)gwdata->b;
-		ad->arm64.NEON_ONE_OVER_B = (gwdata->b != 0) ? 1.0 / (double)gwdata->b : 0.0;
+		ac->NEON_K_HI = k_hi;
+		ac->NEON_K_LO = gwdata->k - k_hi;
 	}
 
-	if (gwdata->k == 1.0)
-		ad->arm64.NEON_NORM012_FF = (double)gwdata->FFTLEN * 0.5;
-	else
-		ad->arm64.NEON_NORM012_FF = (double)gwdata->FFTLEN * 0.5 / gwdata->k;
+	ac->NEON_MINUS_C = ad->u.xmm.XMM_MINUS_C[0];
+	if (ac->NEON_MINUS_C == 0.0 && gwdata->c != 0) {
+		ac->NEON_MINUS_C = (double)(-gwdata->c);
+	}
 
-	ad->arm64.NEON_MAXERR = 0.0;
-	ad->MAXERR = 0.0;
+	ac->NEON_MULCONST = ad->u.xmm.XMM_MULCONST[0];
+	if (ac->NEON_MULCONST == 0.0) {
+		ac->NEON_MULCONST = (double)gwdata->mulbyconst;
+	}
+
+	ac->NEON_NORM012_FF = ad->u.xmm.XMM_NORM012_FF[0];
+	if (ac->NEON_NORM012_FF == 0.0) {
+		if (gwdata->k == 1.0)
+			ac->NEON_NORM012_FF = (double)gwdata->FFTLEN * 0.5;
+		else
+			ac->NEON_NORM012_FF = (double)gwdata->FFTLEN * 0.5 / gwdata->k;
+	}
+
+	ac->NEON_MAXERR = ad->u.xmm.XMM_MAXERR[0];
+	ad->MAXERR = ac->NEON_MAXERR;
+
+	ac->NEON_B = (double)gwdata->b;
+	ac->NEON_ONE_OVER_B = (gwdata->b != 0) ? 1.0 / (double)gwdata->b : 0.0;
+
+	ac->NEON_CARRIES_ROUTINE = NULL;
+	ac->NEON_PASS2_ROUTINE = NULL;
 }

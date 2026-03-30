@@ -3,13 +3,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "gwtables.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-struct gwasm_data;
-struct gwasm_jmptab;
 
 typedef void (*arm64_gwproc_routine)(struct gwasm_data *);
 
@@ -20,7 +18,7 @@ typedef struct arm64_asm_constants {
 	double NEON_SMALL_BASE;
 	double NEON_LARGE_BASE_INV;
 	double NEON_SMALL_BASE_INV;
-	double NEON_BIGVAL;			/* 3.0 * 2^51 */
+	double NEON_BIGVAL;				/* 3.0 * 2^51 */
 	double NEON_LIMIT_INVERSE[2];		/* [small, big] */
 	double NEON_LIMIT_BIGMAX[2];		/* [small, big] */
 	double NEON_K_HI;
@@ -35,121 +33,129 @@ typedef struct arm64_asm_constants {
 	arm64_gwproc_routine NEON_PASS2_ROUTINE;
 } arm64_asm_constants;
 
-/*
- * ARM64 mirror of the subset of asm_data consumed by the C/NEON backend.
- * The gwnum_arm64.patch file shows where gwnum.c wires this in.
- */
-typedef struct arm64_gwasm_data_view {
-	double *DESTARG;
-	double *SRCARG;
-	intptr_t DIST_TO_FFTSRCARG;
-	intptr_t DIST_TO_MULSRCARG;
-	uint32_t ffttype;
-	uint32_t const_fft;
-	uint32_t FFTLEN;
-	uint32_t PASS1_SIZE;
-	uint32_t PASS2_SIZE;
-	uint32_t ADDIN_OFFSET;
-	double ADDIN_VALUE;
-	double POSTADDIN_VALUE;
-	arm64_gwproc_routine NORMRTN;
-	double *sincos1;
-	double *sincos2;
-	double *sincos3;
-	double *norm_col_mults;
-	double *norm_grp_mults;
-	double *carries;
-	double MAXERR;
-	arm64_asm_constants arm64;
-} arm64_gwasm_data_view;
+/* Single active constants block populated by arm64_gwsetup_hook(). */
+extern arm64_asm_constants *arm64_active_asm_constants;
 
 #define ARM64_DEFAULT_SMALL_BASE	134217728.0
 #define ARM64_DEFAULT_LARGE_BASE	268435456.0
 #define ARM64_DEFAULT_BIGVAL		6755399441055744.0	/* 3.0 * 2^51 */
 
-static inline arm64_gwasm_data_view *arm64_asm_data_view(struct gwasm_data *asm_data) {
-	return (arm64_gwasm_data_view *)(void *)asm_data;
-}
-
-static inline const arm64_gwasm_data_view *arm64_asm_data_const_view(const struct gwasm_data *asm_data) {
-	return (const arm64_gwasm_data_view *)(const void *)asm_data;
-}
-
-static inline size_t arm64_complex_len(const arm64_gwasm_data_view *ad) {
+static inline size_t arm64_complex_len(const struct gwasm_data *ad) {
 	if (ad == NULL) return 0;
-	if (ad->FFTLEN != 0u) return (size_t)ad->FFTLEN;
-	if (ad->PASS1_SIZE != 0u) return (size_t)ad->PASS1_SIZE;
-	return 0;
+	return (size_t)ad->FFTLEN;
 }
 
-static inline size_t arm64_data_words(const arm64_gwasm_data_view *ad) {
+static inline size_t arm64_data_words(const struct gwasm_data *ad) {
 	return arm64_complex_len(ad) * 2u;
 }
 
-static inline double *arm64_fftsrc_ptr(const arm64_gwasm_data_view *ad) {
+static inline double *arm64_fftsrc_ptr(const struct gwasm_data *ad) {
 	if (ad == NULL || ad->DESTARG == NULL) return NULL;
-	if (ad->DIST_TO_FFTSRCARG == 0) return ad->DESTARG;
 	return (double *)((char *)ad->DESTARG + ad->DIST_TO_FFTSRCARG);
 }
 
-static inline double *arm64_mulsrc_ptr(const arm64_gwasm_data_view *ad) {
+static inline double *arm64_mulsrc_ptr(const struct gwasm_data *ad) {
 	if (ad == NULL || ad->DESTARG == NULL) return NULL;
-	if (ad->DIST_TO_MULSRCARG == 0) return ad->DESTARG;
 	return (double *)((char *)ad->DESTARG + ad->DIST_TO_MULSRCARG);
 }
 
-static inline double arm64_word_base(const arm64_gwasm_data_view *ad, int big_word) {
-	if (ad == NULL) return big_word ? ARM64_DEFAULT_LARGE_BASE : ARM64_DEFAULT_SMALL_BASE;
-	if (big_word) {
-		return ad->arm64.NEON_LARGE_BASE != 0.0 ? ad->arm64.NEON_LARGE_BASE : ARM64_DEFAULT_LARGE_BASE;
+static inline const arm64_asm_constants *arm64_constants(const struct gwasm_data *ad) {
+	(void)ad;
+	return arm64_active_asm_constants;
+}
+
+static inline double arm64_bigval(const struct gwasm_data *ad) {
+	const arm64_asm_constants *ac = arm64_constants(ad);
+	if (ac != NULL && ac->NEON_BIGVAL != 0.0) return ac->NEON_BIGVAL;
+	if (ad != NULL && ad->u.xmm.XMM_BIGVAL[0] != 0.0) return ad->u.xmm.XMM_BIGVAL[0];
+	return ARM64_DEFAULT_BIGVAL;
+}
+
+static inline double arm64_word_base(const struct gwasm_data *ad, int big_word) {
+	const arm64_asm_constants *ac = arm64_constants(ad);
+	int idx = big_word ? ARM64_WORD_BIG : ARM64_WORD_SMALL;
+	double base = 0.0;
+
+	if (ac != NULL) {
+		base = big_word ? ac->NEON_LARGE_BASE : ac->NEON_SMALL_BASE;
 	}
-	return ad->arm64.NEON_SMALL_BASE != 0.0 ? ad->arm64.NEON_SMALL_BASE : ARM64_DEFAULT_SMALL_BASE;
-}
-
-static inline double arm64_word_base_inverse(const arm64_gwasm_data_view *ad, int big_word) {
-	if (ad != NULL) {
-		double inv = ad->arm64.NEON_LIMIT_INVERSE[big_word ? ARM64_WORD_BIG : ARM64_WORD_SMALL];
-		if (inv != 0.0) return inv;
-		inv = big_word ? ad->arm64.NEON_LARGE_BASE_INV : ad->arm64.NEON_SMALL_BASE_INV;
-		if (inv != 0.0) return inv;
+	if (base == 0.0 && ad != NULL) {
+		double inv = ad->u.xmm.XMM_LIMIT_INVERSE[idx];
+		if (inv != 0.0) base = 1.0 / inv;
 	}
-	return 1.0 / arm64_word_base(ad, big_word);
-}
-
-static inline double arm64_word_limit(const arm64_gwasm_data_view *ad, int big_word) {
-	if (ad != NULL) {
-		double lim = ad->arm64.NEON_LIMIT_BIGMAX[big_word ? ARM64_WORD_BIG : ARM64_WORD_SMALL];
-		if (lim != 0.0) return lim;
+	if (base == 0.0) {
+		base = big_word ? ARM64_DEFAULT_LARGE_BASE : ARM64_DEFAULT_SMALL_BASE;
 	}
-	return arm64_word_base(ad, big_word) * 0.5;
+	return base;
 }
 
-static inline double arm64_mulconst(const arm64_gwasm_data_view *ad) {
-	if (ad == NULL) return 1.0;
-	return ad->arm64.NEON_MULCONST != 0.0 ? ad->arm64.NEON_MULCONST : 1.0;
+static inline double arm64_word_base_inverse(const struct gwasm_data *ad, int big_word) {
+	const arm64_asm_constants *ac = arm64_constants(ad);
+	int idx = big_word ? ARM64_WORD_BIG : ARM64_WORD_SMALL;
+	double inv = 0.0;
+
+	if (ac != NULL) {
+		inv = ac->NEON_LIMIT_INVERSE[idx];
+		if (inv == 0.0) inv = big_word ? ac->NEON_LARGE_BASE_INV : ac->NEON_SMALL_BASE_INV;
+	}
+	if (inv == 0.0 && ad != NULL) {
+		inv = ad->u.xmm.XMM_LIMIT_INVERSE[idx];
+	}
+	if (inv == 0.0) {
+		double base = arm64_word_base(ad, big_word);
+		inv = (base != 0.0) ? (1.0 / base) : 0.0;
+	}
+	return inv;
 }
 
-static inline double arm64_inverse_weight_at(const arm64_gwasm_data_view *ad, size_t complex_index) {
+static inline double arm64_word_limit(const struct gwasm_data *ad, int big_word) {
+	const arm64_asm_constants *ac = arm64_constants(ad);
+	int idx = big_word ? ARM64_WORD_BIG : ARM64_WORD_SMALL;
+	double lim = 0.0;
+
+	if (ac != NULL) lim = ac->NEON_LIMIT_BIGMAX[idx];
+	if (lim == 0.0 && ad != NULL) lim = ad->u.xmm.XMM_LIMIT_BIGMAX[idx];
+	if (lim == 0.0) {
+		double base = arm64_word_base(ad, big_word);
+		double bigval = arm64_bigval(ad);
+		lim = base * bigval - bigval;
+	}
+	return lim;
+}
+
+static inline double arm64_mulconst(const struct gwasm_data *ad) {
+	const arm64_asm_constants *ac = arm64_constants(ad);
+	if (ac != NULL && ac->NEON_MULCONST != 0.0) return ac->NEON_MULCONST;
+	if (ad != NULL && ad->u.xmm.XMM_MULCONST[0] != 0.0) return ad->u.xmm.XMM_MULCONST[0];
+	return 1.0;
+}
+
+static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t complex_index) {
 	size_t n;
 	double inv_weight = 1.0;
+	const double *col_mults;
+	const double *grp_mults;
 
 	if (ad == NULL) return 1.0;
 	n = arm64_complex_len(ad);
 	if (n == 0) return 1.0;
 
-	if (ad->norm_col_mults != NULL) {
-		inv_weight *= ad->norm_col_mults[complex_index % n];
+	col_mults = (const double *)ad->norm_col_mults;
+	grp_mults = (const double *)ad->norm_grp_mults;
+
+	if (col_mults != NULL) {
+		inv_weight *= col_mults[complex_index % n];
 	}
-	if (ad->norm_grp_mults != NULL) {
+	if (grp_mults != NULL) {
 		size_t group_span = ad->PASS2_SIZE != 0 ? (size_t)ad->PASS2_SIZE : n;
 		size_t group_index = group_span != 0 ? (complex_index / group_span) : 0;
-		inv_weight *= ad->norm_grp_mults[group_index];
+		inv_weight *= grp_mults[group_index];
 	}
 	if (inv_weight == 0.0) return 1.0;
 	return inv_weight;
 }
 
-static inline double arm64_forward_weight_at(const arm64_gwasm_data_view *ad, size_t complex_index) {
+static inline double arm64_forward_weight_at(const struct gwasm_data *ad, size_t complex_index) {
 	double inv_weight = arm64_inverse_weight_at(ad, complex_index);
 	return inv_weight == 0.0 ? 1.0 : 1.0 / inv_weight;
 }

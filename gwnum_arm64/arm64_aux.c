@@ -1,4 +1,5 @@
 #include "arm64_asm_data.h"
+#include "gwtables.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -7,13 +8,13 @@
 #include <arm_neon.h>
 #endif
 
-static inline double *arm64_aux_source(const arm64_gwasm_data_view *ad) {
+static inline double *arm64_aux_source(struct gwasm_data *ad) {
 	if (ad == NULL) return NULL;
-	if (ad->SRCARG != NULL) return ad->SRCARG;
+	if (ad->SRCARG != NULL) return (double *)ad->SRCARG;
 	return arm64_fftsrc_ptr(ad);
 }
 
-static inline size_t arm64_aux_words(const arm64_gwasm_data_view *ad) {
+static inline size_t arm64_aux_words(const struct gwasm_data *ad) {
 	return arm64_data_words(ad);
 }
 
@@ -50,13 +51,13 @@ static void arm64_vec_sub(double *dst, const double *src, size_t words) {
 #endif
 
 void arm64_gw_addq(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
 	size_t words;
 
 	if (ad == NULL) return;
-	dst = ad->DESTARG;
+	dst = (double *)ad->DESTARG;
 	src = arm64_aux_source(ad);
 	words = arm64_aux_words(ad);
 	if (dst == NULL || src == NULL || words == 0) return;
@@ -65,21 +66,23 @@ void arm64_gw_addq(struct gwasm_data *asm_data) {
 }
 
 void arm64_gw_add(struct gwasm_data *asm_data) {
+	struct gwasm_data *ad = asm_data;
+
 	arm64_gw_addq(asm_data);
-	{
-		arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
-		if (ad != NULL && ad->DESTARG != NULL) arm64_normalize_buffer(asm_data, ad->DESTARG, 0, 0);
+
+	if (ad != NULL && ad->DESTARG != NULL) {
+		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0);
 	}
 }
 
 void arm64_gw_subq(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
 	size_t words;
 
 	if (ad == NULL) return;
-	dst = ad->DESTARG;
+	dst = (double *)ad->DESTARG;
 	src = arm64_aux_source(ad);
 	words = arm64_aux_words(ad);
 	if (dst == NULL || src == NULL || words == 0) return;
@@ -88,22 +91,24 @@ void arm64_gw_subq(struct gwasm_data *asm_data) {
 }
 
 void arm64_gw_sub(struct gwasm_data *asm_data) {
+	struct gwasm_data *ad = asm_data;
+
 	arm64_gw_subq(asm_data);
-	{
-		arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
-		if (ad != NULL && ad->DESTARG != NULL) arm64_normalize_buffer(asm_data, ad->DESTARG, 0, 0);
+
+	if (ad != NULL && ad->DESTARG != NULL) {
+		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0);
 	}
 }
 
 void arm64_gw_addsubq(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
 	size_t words;
 	size_t i;
 
 	if (ad == NULL) return;
-	dst = ad->DESTARG;
+	dst = (double *)ad->DESTARG;
 	src = arm64_aux_source(ad);
 	words = arm64_aux_words(ad);
 	if (dst == NULL || src == NULL || words == 0) return;
@@ -134,29 +139,30 @@ void arm64_gw_addsubq(struct gwasm_data *asm_data) {
 }
 
 void arm64_gw_addsub(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *src;
+
 	if (ad == NULL) return;
 
 	arm64_gw_addsubq(asm_data);
 
 	if (ad->DESTARG != NULL) {
-		arm64_normalize_buffer(asm_data, ad->DESTARG, 0, 0);
+		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0);
 	}
 
 	src = arm64_aux_source(ad);
-	if (src != NULL && src != ad->DESTARG) {
+	if (src != NULL && src != (double *)ad->DESTARG) {
 		arm64_normalize_buffer(asm_data, src, 0, 0);
 	}
 }
 
 void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
 
 	if (ad == NULL) return;
-	dst = ad->DESTARG;
+	dst = (double *)ad->DESTARG;
 	src = arm64_aux_source(ad);
 	if (dst == NULL || src == NULL) return;
 
@@ -176,14 +182,14 @@ void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
 }
 
 void arm64_gw_muls(struct gwasm_data *asm_data) {
-	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
+	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
 	size_t words;
 	double mul;
 
 	if (ad == NULL) return;
-	dst = ad->DESTARG;
+	dst = (double *)ad->DESTARG;
 	src = arm64_aux_source(ad);
 	words = arm64_aux_words(ad);
 	if (dst == NULL || words == 0) return;
