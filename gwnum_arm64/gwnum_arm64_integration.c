@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include "cpuid.h"
 #include "gwnum.h"
+#include "gwdbldbl.h"
 #include "gwtables.h"
 #include "arm64_asm_data.h"
 
