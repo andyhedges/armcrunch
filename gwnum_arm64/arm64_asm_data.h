@@ -212,18 +212,23 @@ static inline int arm64_is_big_word(const struct gwasm_data *ad, size_t word_ind
 		num_b_small = n_exp / (unsigned long)fftlen;
 	}
 
+	/* gwfft_base(j) returns ceil(j*n/FFTLEN), not floor.
+	   num_b_in_word = ceil((j+1)*n/FFTLEN) - ceil(j*n/FFTLEN)
+	   Use the identity: ceil(a/b) = (a + b - 1) / b for positive integers. */
 #if defined(__SIZEOF_INT128__)
 	{
-		__uint128_t lo = ((__uint128_t)word_index * (__uint128_t)n_exp) / (__uint128_t)fftlen;
-		__uint128_t hi = ((__uint128_t)(word_index + 1u) * (__uint128_t)n_exp) / (__uint128_t)fftlen;
-		__uint128_t num_b = hi - lo;
+		__uint128_t fn = (__uint128_t)fftlen;
+		__uint128_t base_lo = ((__uint128_t)word_index * (__uint128_t)n_exp + fn - 1u) / fn;
+		__uint128_t base_hi = ((__uint128_t)(word_index + 1u) * (__uint128_t)n_exp + fn - 1u) / fn;
+		__uint128_t num_b = base_hi - base_lo;
 		return (num_b > (__uint128_t)num_b_small) ? 1 : 0;
 	}
 #else
 	{
-		long double lo = floorl(((long double)word_index * (long double)n_exp) / (long double)fftlen);
-		long double hi = floorl(((long double)(word_index + 1u) * (long double)n_exp) / (long double)fftlen);
-		long double num_b = hi - lo;
+		long double fn = (long double)fftlen;
+		long double base_lo = ceill(((long double)word_index * (long double)n_exp) / fn);
+		long double base_hi = ceill(((long double)(word_index + 1u) * (long double)n_exp) / fn);
+		long double num_b = base_hi - base_lo;
 		return (num_b > (long double)num_b_small) ? 1 : 0;
 	}
 #endif
