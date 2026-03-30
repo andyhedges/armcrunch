@@ -2,6 +2,7 @@
 #include "gwtables.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stddef.h>
 
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
@@ -28,6 +29,8 @@ static double arm64_carry_quotient(double value, double base, double inv_base) {
 }
 
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
+	static int norm_debug = 0;
+	int do_debug = (norm_debug < 2);
 	struct gwasm_data *ad = asm_data;
 	size_t words;
 	size_t word;
@@ -49,6 +52,27 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	addin_offset = (size_t)ad->ADDIN_OFFSET;
 	carries = (double *)ad->carries;
 
+	if (do_debug) {
+		size_t k;
+		fprintf(stderr, "[ARM64 NORM] call #%d words=%zu mulconst=%d addin_off=%zu base[s]=%.4g base[b]=%.4g limit[s]=%.4g limit[b]=%.4g\n",
+			norm_debug, words, use_mulconst, addin_offset,
+			arm64_word_base(ad, 0), arm64_word_base(ad, 1),
+			arm64_word_limit(ad, 0), arm64_word_limit(ad, 1));
+		fprintf(stderr, "[ARM64 NORM] post-FFT scrambled[0..7]: ");
+		for (k = 0; k < 8 && k < words; k++)
+			fprintf(stderr, "%.6f ", arm64_load_scrambled_word(ad, buffer, k));
+		fprintf(stderr, "\n[ARM64 NORM] inv-weighted[0..7]:      ");
+		for (k = 0; k < 8 && k < words; k++) {
+			double v = arm64_load_scrambled_word(ad, buffer, k) * arm64_inverse_weight_at(ad, k);
+			fprintf(stderr, "%.6f ", v);
+		}
+		fprintf(stderr, "\n[ARM64 NORM] is_big[0..7]:            ");
+		for (k = 0; k < 8 && k < words; k++)
+			fprintf(stderr, "%d ", arm64_is_big_word(ad, k));
+		fprintf(stderr, "\n");
+		norm_debug++;
+	}
+
 	for (word = 0; word < words; ++word) {
 		int big_word = arm64_is_big_word(ad, word);
 		double base = arm64_word_base(ad, big_word);
@@ -58,7 +82,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		double rounded;
 		double carry_out = 0.0;
 
-		/* Undo IBDWT weight for this logical word. */
 		value *= arm64_inverse_weight_at(ad, word);
 
 		if (use_mulconst) value *= mulconst;
@@ -75,11 +98,22 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			if (err > maxerr) maxerr = err;
 		}
 
+		if (do_debug && word < 8) {
+			fprintf(stderr, "[ARM64 NORM]  w%zu: raw=%.6f inv_w=%.6f rounded=%.1f carry_in=%.1f",
+				word, arm64_load_scrambled_word(ad, buffer, word),
+				value, rounded, carry);
+		}
+
 		rounded += carry;
 
 		if (rounded > limit || rounded < -limit) {
 			carry_out = arm64_carry_quotient(rounded, base, inv_base);
 			rounded -= carry_out * base;
+		}
+
+		if (do_debug && word < 8) {
+			fprintf(stderr, " after_carry=%.1f carry_out=%.1f big=%d\n",
+				rounded, carry_out, big_word);
 		}
 
 		carry = carry_out;
