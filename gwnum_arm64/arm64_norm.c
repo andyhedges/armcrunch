@@ -2,7 +2,6 @@
 #include "gwtables.h"
 
 #include <math.h>
-#include <stdio.h>
 #include <stddef.h>
 
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
@@ -22,15 +21,7 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 	*(double *)ptr = value;
 }
 
-static double arm64_carry_quotient(double value, double base, double inv_base) {
-	if (base == 0.0) return 0.0;
-	if (value >= 0.0) return floor(value * inv_base);
-	return ceil(value * inv_base);
-}
-
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
-	static int norm_debug = 0;
-	int do_debug = (norm_debug < 2);
 	struct gwasm_data *ad = asm_data;
 	size_t words;
 	size_t word;
@@ -52,82 +43,76 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	addin_offset = (size_t)ad->ADDIN_OFFSET;
 	carries = (double *)ad->carries;
 
-	if (do_debug) {
-		size_t k;
-		fprintf(stderr, "[ARM64 NORM] call #%d words=%zu mulconst=%d addin_off=%zu base[s]=%.4g base[b]=%.4g limit[s]=%.4g limit[b]=%.4g\n",
-			norm_debug, words, use_mulconst, addin_offset,
-			arm64_word_base(ad, 0), arm64_word_base(ad, 1),
-			arm64_word_limit(ad, 0), arm64_word_limit(ad, 1));
-		fprintf(stderr, "[ARM64 NORM] post-FFT scrambled[0..7]: ");
-		for (k = 0; k < 8 && k < words; k++)
-			fprintf(stderr, "%.6f ", arm64_load_scrambled_word(ad, buffer, k));
-		fprintf(stderr, "\n[ARM64 NORM] inv-weighted[0..7]:      ");
-		for (k = 0; k < 8 && k < words; k++) {
-			double v = arm64_load_scrambled_word(ad, buffer, k) * arm64_inverse_weight_at(ad, k);
-			fprintf(stderr, "%.6f ", v);
-		}
-		fprintf(stderr, "\n[ARM64 NORM] is_big[0..7]:            ");
-		for (k = 0; k < 8 && k < words; k++)
-			fprintf(stderr, "%d ", arm64_is_big_word(ad, k));
-		fprintf(stderr, "\n");
-		norm_debug++;
-	}
-
 	for (word = 0; word < words; ++word) {
 		int big_word = arm64_is_big_word(ad, word);
 		double base = arm64_word_base(ad, big_word);
 		double inv_base = arm64_word_base_inverse(ad, big_word);
-		double limit = arm64_word_limit(ad, big_word);
 		double value = arm64_load_scrambled_word(ad, buffer, word);
 		double rounded;
-		double carry_out = 0.0;
+		double carry_out;
+		double digit;
+		double stored;
 
+		/* Undo IBDWT weight. */
 		value *= arm64_inverse_weight_at(ad, word);
 
+		/* Optional mulconst path. */
 		if (use_mulconst) value *= mulconst;
 
+		/* Optional addin at configured offset. */
 		if (word == addin_offset) {
 			value += ad->ADDIN_VALUE;
 			value += ad->POSTADDIN_VALUE;
 		}
 
+		/* Round to nearest integer and track roundoff error. */
 		rounded = nearbyint(value);
-
 		if (errchk) {
 			double err = fabs(value - rounded);
 			if (err > maxerr) maxerr = err;
 		}
 
-		if (do_debug && word < 8) {
-			fprintf(stderr, "[ARM64 NORM]  w%zu: raw=%.6f inv_w=%.6f rounded=%.1f carry_in=%.1f",
-				word, arm64_load_scrambled_word(ad, buffer, word),
-				value, rounded, carry);
-		}
-
+		/* Add incoming carry and ALWAYS extract outgoing carry. */
 		rounded += carry;
-
-		if (rounded > limit || rounded < -limit) {
-			carry_out = arm64_carry_quotient(rounded, base, inv_base);
-			rounded -= carry_out * base;
+		if (base != 0.0) {
+			carry_out = nearbyint(rounded * inv_base);
+		} else {
+			carry_out = 0.0;
 		}
 
-		if (do_debug && word < 8) {
-			fprintf(stderr, " after_carry=%.1f carry_out=%.1f big=%d\n",
-				rounded, carry_out, big_word);
-		}
+		/* Balanced digit after carry extraction. */
+		digit = rounded - carry_out * base;
+
+		/* Re-apply forward weight before storing back to FFT layout. */
+		stored = digit * arm64_forward_weight_at(ad, word);
+		arm64_store_scrambled_word(ad, buffer, word, stored);
 
 		carry = carry_out;
-		arm64_store_scrambled_word(ad, buffer, word, rounded);
-
-		if (carries != NULL) {
-			carries[word] = carry;
-		}
+		if (carries != NULL) carries[word] = carry;
 	}
 
+	/* Wraparound carry: multiply by -c and add into word 0 (unweighted domain). */
 	if (carry != 0.0) {
-		double wrapped = arm64_load_scrambled_word(ad, buffer, 0u) + carry;
-		arm64_store_scrambled_word(ad, buffer, 0u, wrapped);
-		if (carries != NULL) carries[0] += carry;
+		const arm64_asm_constants *ac = arm64_constants(ad);
+		double minus_c = 1.0;
+		double wrap_carry;
+		double w0;
+
+		if (ac != NULL && ac->NEON_MINUS_C != 0.0) {
+			minus_c = ac->NEON_MINUS_C;
+		} else if (ad->gwdata != NULL && ad->gwdata->c != 0) {
+			minus_c = (double)(-ad->gwdata->c);
+		}
+
+		wrap_carry = carry * minus_c;
+
+		w0 = arm64_load_scrambled_word(ad, buffer, 0u);
+		w0 *= arm64_inverse_weight_at(ad, 0u);
+		w0 += wrap_carry;
+		w0 *= arm64_forward_weight_at(ad, 0u);
+		arm64_store_scrambled_word(ad, buffer, 0u, w0);
+
+		if (carries != NULL) carries[0] += wrap_carry;
 	}
 
 	if (errchk && maxerr > ad->MAXERR) {
