@@ -168,6 +168,10 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 
 	ad = (struct gwasm_data *)gwdata->asm_data;
 
+	/* Set the gwdata back-pointer so addr_offset() works in the ARM64
+	   FFT and normalization code. */
+	ad->gwdata = gwdata;
+
 	/* Keep core setup fields synchronized with gwdata. */
 	ad->FFTLEN = (uint32_t)gwdata->FFTLEN;
 	ad->const_fft = 0;
