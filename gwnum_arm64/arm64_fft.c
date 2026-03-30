@@ -450,6 +450,91 @@ static void arm64_pointwise_square(double *dst, const double *src, size_t comple
 	}
 }
 
+static void arm64_real_fft_split(double *Z, double *X, size_t half) {
+	size_t n;
+	size_t k;
+	double angle_scale;
+
+	if (Z == NULL || X == NULL || half == 0u) return;
+
+	n = half * 2u;
+	angle_scale = -2.0 * M_PI / (double)n;
+
+	for (k = 0; k <= half; ++k) {
+		size_t k0 = (k == half) ? 0u : k;
+		size_t k2 = (k == 0u || k == half) ? 0u : (half - k);
+		arm64_complex a = arm64_c_load(Z, k0);
+		arm64_complex b = arm64_c_load(Z, k2);
+		arm64_complex even;
+		arm64_complex odd_raw;
+		arm64_complex odd;
+		arm64_complex tw;
+		arm64_complex xk;
+		double angle = angle_scale * (double)k;
+
+		b.i = -b.i;
+
+		even.r = 0.5 * (a.r + b.r);
+		even.i = 0.5 * (a.i + b.i);
+
+		odd_raw.r = 0.5 * (a.r - b.r);
+		odd_raw.i = 0.5 * (a.i - b.i);
+
+		odd = arm64_c_mul_minus_i(odd_raw);
+
+		tw.r = cos(angle);
+		tw.i = sin(angle);
+
+		xk = arm64_c_add(even, arm64_c_mul(tw, odd));
+		if (k == 0u || k == half) xk.i = 0.0;
+		arm64_c_store(X, k, xk);
+	}
+}
+
+static void arm64_real_fft_merge(double *X, double *Z, size_t half) {
+	size_t n;
+	size_t k;
+	double angle_scale;
+
+	if (X == NULL || Z == NULL || half == 0u) return;
+
+	n = half * 2u;
+	angle_scale = 2.0 * M_PI / (double)n;
+
+	for (k = 0; k < half; ++k) {
+		size_t mirror = half - k;
+		arm64_complex xk = arm64_c_load(X, k);
+		arm64_complex xhk = arm64_c_load(X, mirror);
+		arm64_complex even;
+		arm64_complex wk_odd;
+		arm64_complex tw_inv;
+		arm64_complex odd;
+		arm64_complex zk;
+		double angle = angle_scale * (double)k;
+
+		xhk.i = -xhk.i;
+
+		even.r = 0.5 * (xk.r + xhk.r);
+		even.i = 0.5 * (xk.i + xhk.i);
+
+		wk_odd.r = 0.5 * (xk.r - xhk.r);
+		wk_odd.i = 0.5 * (xk.i - xhk.i);
+
+		tw_inv.r = cos(angle);
+		tw_inv.i = sin(angle);
+		odd = arm64_c_mul(wk_odd, tw_inv);
+
+		zk = arm64_c_add(even, arm64_c_mul_i(odd));
+		arm64_c_store(Z, k, zk);
+	}
+}
+
+static void arm64_real_fft_make_endpoints_real(double *X, size_t half) {
+	if (X == NULL || half == 0u) return;
+	X[1u] = 0.0;
+	X[half * 2u + 1u] = 0.0;
+}
+
 static void arm64_normalize(struct gwasm_data *asm_data) {
 	struct gwasm_data *ad = asm_data;
 	if (ad != NULL && ad->NORMRTN != NULL) {
@@ -467,9 +552,12 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	double *s2;
 	size_t words;
 	size_t complex_len;
+	size_t spectrum_words;
 	unsigned int ffttype;
 	double *tmp1 = NULL;
 	double *tmp2 = NULL;
+	double *spec1 = NULL;
+	double *spec2 = NULL;
 	int ok = 1;
 
 	if (ad == NULL) return;
@@ -495,6 +583,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	}
 
 	if (!arm64_is_power_of_two(complex_len)) return;
+	spectrum_words = (complex_len + 1u) * 2u;
 
 	s1 = arm64_fftsrc_ptr(ad);
 	s2 = arm64_mulsrc_ptr(ad);
@@ -506,59 +595,86 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	tmp1 = (double *)malloc(words * sizeof(double));
 	if (tmp1 == NULL) return;
 
+	if (ffttype == 2u || ffttype == 3u || ffttype == 4u) {
+		spec1 = (double *)malloc(spectrum_words * sizeof(double));
+		if (spec1 == NULL) {
+			free(tmp1);
+			return;
+		}
+	}
+
 	if (ffttype == 3u || ffttype == 4u) {
 		tmp2 = (double *)malloc(words * sizeof(double));
 		if (tmp2 == NULL) {
+			free(spec1);
+			free(tmp1);
+			return;
+		}
+		spec2 = (double *)malloc(spectrum_words * sizeof(double));
+		if (spec2 == NULL) {
+			free(tmp2);
+			free(spec1);
 			free(tmp1);
 			return;
 		}
 	}
 
 	switch (ffttype) {
-	case 1:	/* forward FFT only (s1 is time-domain) */
+	case 1:	/* forward FFT only: store packed N/2 complex spectrum */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
 		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		break;
 
-	case 2:	/* forward + square + inverse + normalize */
+	case 2:	/* forward + square in full real spectrum + inverse + normalize */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
-		arm64_pointwise_square(tmp1, tmp1, complex_len);
+		arm64_real_fft_split(tmp1, spec1, complex_len);
+		arm64_pointwise_square(spec1, spec1, complex_len + 1u);
+		arm64_real_fft_make_endpoints_real(spec1, complex_len);
+		arm64_real_fft_merge(spec1, tmp1, complex_len);
 		arm64_inverse_fft(tmp1, complex_len);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
 		break;
 
-	case 3:	/* forward s1 + mul by already-FFTed s2 + inverse + normalize */
+	case 3:	/* forward s1 + mul by already-FFTed packed s2 + inverse + normalize */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
-		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
+		arm64_real_fft_split(tmp1, spec1, complex_len);
+		arm64_real_fft_split(tmp2, spec2, complex_len);
+		arm64_pointwise_mul(spec1, spec1, spec2, complex_len + 1u);
+		arm64_real_fft_make_endpoints_real(spec1, complex_len);
+		arm64_real_fft_merge(spec1, tmp1, complex_len);
 		arm64_inverse_fft(tmp1, complex_len);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
 		break;
 
-	case 4:	/* mul two already-FFTed operands + inverse + normalize */
+	case 4:	/* mul two already-FFTed packed operands + inverse + normalize */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
-		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
+		arm64_real_fft_split(tmp1, spec1, complex_len);
+		arm64_real_fft_split(tmp2, spec2, complex_len);
+		arm64_pointwise_mul(spec1, spec1, spec2, complex_len + 1u);
+		arm64_real_fft_make_endpoints_real(spec1, complex_len);
+		arm64_real_fft_merge(spec1, tmp1, complex_len);
 		arm64_inverse_fft(tmp1, complex_len);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
 		break;
 
-	case 5:	/* inverse + normalize only (input already FFTed) */
+	case 5:	/* inverse + normalize only (input already packed FFTed) */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_inverse_fft(tmp1, complex_len);
@@ -575,6 +691,8 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		break;
 	}
 
+	free(spec2);
+	free(spec1);
 	free(tmp2);
 	free(tmp1);
 }
