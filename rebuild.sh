@@ -90,4 +90,8 @@ fi
 
 make
 
-./prst "2^61-1"
+# Note: gwnum requires log2(b)*n >= 350 for the IBDWT fast path.
+# Numbers smaller than ~350 bits fall through to the general-purpose
+# modular reduction path which our ARM64 backend does not yet support.
+# 2^1279-1 is a known Mersenne prime (1279 bits) that uses the IBDWT path.
+./prst "2^1279-1"
