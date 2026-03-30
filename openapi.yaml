@@ -8,7 +8,7 @@ info:
     and returns the output and benchmark results.
 
 servers:
-  - url: http://home.hedges.io:1337/
+  - url: http://localhost:80
     description: Local development server
 
 security:
@@ -30,9 +30,9 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RunRequest"
+              $ref: '#/components/schemas/RunRequest'
       responses:
-        "200":
+        '200':
           description: >
             Execution completed. Check the `status` field to distinguish success
             (`ok`) from user-code failure (`error` with `RUNTIME_ERROR` or `TIMEOUT`).
@@ -40,22 +40,22 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/SuccessResponse"
-                  - $ref: "#/components/schemas/RuntimeErrorResponse"
-        "400":
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - $ref: '#/components/schemas/RuntimeErrorResponse'
+        '400':
           description: >
             Request validation, static analysis, compile, or binary verification error.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CompileErrorResponse"
-        "401":
+                $ref: '#/components/schemas/CompileErrorResponse'
+        '401':
           description: Missing or invalid API key.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
           description: Rate limit exceeded.
           headers:
             Retry-After:
@@ -65,8 +65,8 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
           description: Execution slot is occupied by another benchmark.
           headers:
             Retry-After:
@@ -76,13 +76,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SlotBusyResponse"
-        "500":
+                $ref: '#/components/schemas/SlotBusyResponse'
+        '500':
           description: Internal server error.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: '#/components/schemas/ErrorResponse'
 
 components:
   securitySchemes:
@@ -100,7 +100,7 @@ components:
         source:
           type: string
           description: ARM64 assembly source code.
-          maxLength: 65536
+          maxLength: 524288
         entrypoint:
           type: string
           description: >
@@ -138,9 +138,9 @@ components:
           type: string
           const: ok
         output:
-          $ref: "#/components/schemas/OutputData"
+          $ref: '#/components/schemas/OutputData'
         benchmark:
-          $ref: "#/components/schemas/BenchmarkStats"
+          $ref: '#/components/schemas/BenchmarkStats'
 
     RuntimeErrorResponse:
       type: object
