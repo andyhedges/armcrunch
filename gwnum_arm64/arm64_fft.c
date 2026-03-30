@@ -121,127 +121,6 @@ static arm64_complex arm64_twiddle(unsigned tw_mul, size_t j, size_t m, int inve
 	return w;
 }
 
-static void arm64_forward_radix2_stage(double *data, size_t n, size_t m) {
-	size_t half = m / 2u;
-	size_t k;
-
-	for (k = 0; k < n; k += m) {
-		size_t j;
-		for (j = 0; j < half; ++j) {
-			size_t i0 = k + j;
-			size_t i1 = i0 + half;
-			arm64_complex a = arm64_c_load(data, i0);
-			arm64_complex b = arm64_c_load(data, i1);
-			arm64_complex w = arm64_twiddle(1u, j, m, 0);
-			arm64_complex bw = arm64_c_mul(b, w);
-
-			arm64_c_store(data, i0, arm64_c_add(a, bw));
-			arm64_c_store(data, i1, arm64_c_sub(a, bw));
-		}
-	}
-}
-
-static void arm64_forward_radix4_stage(double *data, size_t n, size_t m) {
-	size_t quarter = m / 4u;
-	size_t k;
-
-	for (k = 0; k < n; k += m) {
-		size_t j;
-		for (j = 0; j < quarter; ++j) {
-			size_t i0 = k + j;
-			size_t i1 = i0 + quarter;
-			size_t i2 = i1 + quarter;
-			size_t i3 = i2 + quarter;
-
-			arm64_complex a0 = arm64_c_load(data, i0);
-			arm64_complex a1 = arm64_c_load(data, i1);
-			arm64_complex a2 = arm64_c_load(data, i2);
-			arm64_complex a3 = arm64_c_load(data, i3);
-
-			arm64_complex w1 = arm64_twiddle(1u, j, m, 0);
-			arm64_complex w2 = arm64_twiddle(2u, j, m, 0);
-			arm64_complex w3 = arm64_twiddle(3u, j, m, 0);
-
-			arm64_complex t0, t1, t2, t3;
-			arm64_complex b0, b1, b2, b3;
-
-			a1 = arm64_c_mul(a1, w1);
-			a2 = arm64_c_mul(a2, w2);
-			a3 = arm64_c_mul(a3, w3);
-
-			t0 = arm64_c_add(a0, a2);
-			t1 = arm64_c_sub(a0, a2);
-			t2 = arm64_c_add(a1, a3);
-			t3 = arm64_c_mul_minus_i(arm64_c_sub(a1, a3));
-
-			b0 = arm64_c_add(t0, t2);
-			b2 = arm64_c_sub(t0, t2);
-			b1 = arm64_c_add(t1, t3);
-			b3 = arm64_c_sub(t1, t3);
-
-			arm64_c_store(data, i0, b0);
-			arm64_c_store(data, i1, b1);
-			arm64_c_store(data, i2, b2);
-			arm64_c_store(data, i3, b3);
-		}
-	}
-}
-
-static void arm64_inverse_radix2_final_stage(double *data, size_t n) {
-	size_t i;
-	for (i = 0; i < n; i += 2u) {
-		arm64_complex a = arm64_c_load(data, i);
-		arm64_complex b = arm64_c_load(data, i + 1u);
-		arm64_c_store(data, i, arm64_c_add(a, b));
-		arm64_c_store(data, i + 1u, arm64_c_sub(a, b));
-	}
-}
-
-static void arm64_inverse_radix4_stage(double *data, size_t n, size_t m) {
-	size_t quarter = m / 4u;
-	size_t k;
-	(void)n;
-
-	for (k = 0; k < n; k += m) {
-		size_t j;
-		for (j = 0; j < quarter; ++j) {
-			size_t i0 = k + j;
-			size_t i1 = i0 + quarter;
-			size_t i2 = i1 + quarter;
-			size_t i3 = i2 + quarter;
-
-			arm64_complex a0 = arm64_c_load(data, i0);
-			arm64_complex a1 = arm64_c_load(data, i1);
-			arm64_complex a2 = arm64_c_load(data, i2);
-			arm64_complex a3 = arm64_c_load(data, i3);
-
-			arm64_complex t0 = arm64_c_add(a0, a2);
-			arm64_complex t1 = arm64_c_sub(a0, a2);
-			arm64_complex t2 = arm64_c_add(a1, a3);
-			arm64_complex t3 = arm64_c_sub(a1, a3);
-			arm64_complex t3i = arm64_c_mul_i(t3);
-
-			arm64_complex y0 = arm64_c_add(t0, t2);
-			arm64_complex y1 = arm64_c_add(t1, t3i);
-			arm64_complex y2 = arm64_c_sub(t0, t2);
-			arm64_complex y3 = arm64_c_sub(t1, t3i);
-
-			arm64_complex w1 = arm64_twiddle(1u, j, m, 1);
-			arm64_complex w2 = arm64_twiddle(2u, j, m, 1);
-			arm64_complex w3 = arm64_twiddle(3u, j, m, 1);
-
-			y1 = arm64_c_mul(y1, w1);
-			y2 = arm64_c_mul(y2, w2);
-			y3 = arm64_c_mul(y3, w3);
-
-			arm64_c_store(data, i0, y0);
-			arm64_c_store(data, i1, y1);
-			arm64_c_store(data, i2, y2);
-			arm64_c_store(data, i3, y3);
-		}
-	}
-}
-
 static void arm64_scale_inverse(double *data, size_t complex_len) {
 	size_t words = complex_len * 2u;
 	double inv_n = 1.0 / (double)complex_len;
@@ -262,33 +141,7 @@ static void arm64_scale_inverse(double *data, size_t complex_len) {
 #endif
 }
 
-static void arm64_forward_fft(double *data, size_t n) {
-	int log2_n;
-	size_t m;
-
-	if (data == NULL) return;
-	if (n < 2u) return;
-	if (!arm64_is_power_of_two(n)) return;
-
-	arm64_bit_reverse_permute(data, n);
-	log2_n = arm64_log2_u32((uint32_t)n);
-
-	if ((log2_n & 1) != 0) {
-		arm64_forward_radix2_stage(data, n, 2u);
-		m = 8u;
-	} else {
-		m = 4u;
-	}
-
-	for (; m <= n; m *= 4u) {
-		arm64_forward_radix4_stage(data, n, m);
-	}
-
-	arm64_bit_reverse_permute(data, n);
-}
-
-static void arm64_inverse_fft(double *data, size_t n) {
-	int log2_n;
+static void arm64_fft(double *data, size_t n, int inverse) {
 	size_t m;
 
 	if (data == NULL) return;
@@ -297,19 +150,36 @@ static void arm64_inverse_fft(double *data, size_t n) {
 
 	arm64_bit_reverse_permute(data, n);
 
-	log2_n = arm64_log2_u32((uint32_t)n);
+	for (m = 2u; m <= n; m *= 2u) {
+		size_t half = m / 2u;
+		double angle_base = (inverse ? 2.0 : -2.0) * M_PI / (double)m;
+		size_t k;
 
-	for (m = n; m >= 4u; m /= 4u) {
-		arm64_inverse_radix4_stage(data, n, m);
-		if (m == 4u) break;
+		for (k = 0; k < n; k += m) {
+			size_t j;
+			for (j = 0; j < half; ++j) {
+				double angle = angle_base * (double)j;
+				arm64_complex w;
+				size_t i0 = k + j;
+				size_t i1 = i0 + half;
+				arm64_complex a = arm64_c_load(data, i0);
+				arm64_complex b = arm64_c_load(data, i1);
+				arm64_complex bw;
+
+				w.r = cos(angle);
+				w.i = sin(angle);
+
+				bw = arm64_c_mul(b, w);
+
+				arm64_c_store(data, i0, arm64_c_add(a, bw));
+				arm64_c_store(data, i1, arm64_c_sub(a, bw));
+			}
+		}
 	}
 
-	if ((log2_n & 1) != 0) {
-		arm64_inverse_radix2_final_stage(data, n);
+	if (inverse) {
+		arm64_scale_inverse(data, n);
 	}
-
-	arm64_bit_reverse_permute(data, n);
-	arm64_scale_inverse(data, n);
 }
 
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
@@ -543,14 +413,14 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	case 1:	/* forward FFT only using full N-point complex FFT */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
-		arm64_forward_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 0);
 		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		break;
 
 	case 2:	/* forward + square + inverse + normalize */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
-		arm64_forward_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 0);
 		if (fft_call_count <= 2) {
 			fprintf(stderr, "[ARM64 FFT #%d] post-fwd Z[0..3]: (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g)\n",
 				fft_call_count, tmp1[0], tmp1[1], tmp1[2], tmp1[3], tmp1[4], tmp1[5], tmp1[6], tmp1[7]);
@@ -560,7 +430,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 			fprintf(stderr, "[ARM64 FFT #%d] post-square Z2[0..3]: (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g)\n",
 				fft_call_count, tmp1[0], tmp1[1], tmp1[2], tmp1[3], tmp1[4], tmp1[5], tmp1[6], tmp1[7]);
 		}
-		arm64_inverse_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 1);
 		if (fft_call_count <= 2) {
 			size_t k;
 			fprintf(stderr, "[ARM64 FFT #%d] post-ifft linear[0..7]: ", fft_call_count);
@@ -579,9 +449,9 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
-		arm64_forward_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 0);
 		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
-		arm64_inverse_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 1);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
@@ -593,7 +463,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
 		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
-		arm64_inverse_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 1);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
@@ -602,7 +472,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	case 5:	/* inverse + normalize only (input already FFTed) */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
-		arm64_inverse_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 1);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
@@ -611,7 +481,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	default:
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
-		arm64_forward_fft(tmp1, complex_len);
+		arm64_fft(tmp1, complex_len, 0);
 		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		break;
 	}
