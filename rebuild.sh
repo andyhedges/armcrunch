@@ -55,15 +55,15 @@ cp gwnum.a ~/code/prst/framework/gwnum/macarm64/
 cd ~/code/prst/src/macarm64
 make clean
 
+# Remove stale local logging.h from previous build attempts
+rm -f logging.h
+
 # Patch framework's logging.h in-place to handle missing params gracefully.
-# Save backup first, then restore after build.
 # PRST's Progress::param_double/param_int call std::stod/stoi on potentially
 # empty strings when a .param file doesn't exist on first run.
-LOGGING_H="../../framework/logging.h"
-cp "$LOGGING_H" "${LOGGING_H}.bak"
-
+# This patch is intentional and persistent. Restore with: git checkout -- ../../framework/logging.h
 python3 -c "
-with open('${LOGGING_H}') as f:
+with open('../../framework/logging.h') as f:
     content = f.read()
 content = content.replace(
     'return std::stod(_params[name], nullptr);',
@@ -73,21 +73,21 @@ content = content.replace(
     'return std::stoi(_params[name], nullptr, 10);',
     'auto it = _params.find(name); return (it != _params.end() && !it->second.empty()) ? std::stoi(it->second) : 0;'
 )
-with open('${LOGGING_H}', 'w') as f:
+with open('../../framework/logging.h', 'w') as f:
     f.write(content)
 "
 
 echo "=== Verifying patched logging.h ==="
-grep 'param_double\|param_int' "$LOGGING_H"
+grep 'param_double\|param_int' "../../framework/logging.h"
 echo "=== End verify ==="
 
-# Belt-and-suspenders: ensure no local logging.h exists right before build
+# Ensure no local logging.h exists before build
 rm -f logging.h
+if [ -f logging.h ]; then
+    echo "ERROR: logging.h still exists after rm -f!"
+    exit 1
+fi
 
 make
-
-# Restore original logging.h
-cp "${LOGGING_H}.bak" "$LOGGING_H"
-rm -f "${LOGGING_H}.bak"
 
 ./prst "2^61-1"
