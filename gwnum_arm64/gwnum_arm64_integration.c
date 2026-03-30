@@ -93,6 +93,13 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 
 	if (fftlen == 0) return GWERROR_TOO_LARGE;
 
+	/* Set CPU_SSE2 so internal_gwsetup() follows the SSE2 code path for
+	   table building. On 64-bit builds, cpu_flags==0 has no valid code path
+	   (x87 is compiled out). The SSE2 path builds IBDWT weight tables,
+	   sin/cos tables, and carry arrays correctly. arm64_gwsetup_hook then
+	   overwrites the SSE2 GWPROCPTRS with ARM64 implementations. */
+	gwdata->cpu_flags = CPU_SSE2;
+
 	/* Populate all gwdata fields that gwinfo() normally sets. */
 
 	gwdata->FFTLEN = fftlen;
@@ -109,7 +116,6 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 	gwdata->GW_ALIGNMENT = 128;
 	gwdata->GW_ALIGNMENT_MOD = 0;
 	gwdata->mem_needed = fftlen * (unsigned long)(sizeof(double) * 12);
-	gwdata->GWPROCPTRS[0] = (void (*)(void *))arm64_fft_entry;
 
 	/* EXTRA_BITS: headroom before roundoff errors become dangerous */
 	{
