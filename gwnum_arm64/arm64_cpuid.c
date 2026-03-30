@@ -18,9 +18,9 @@
 #define CPU_ARCHITECTURE_ARM64 64
 #endif
 
-int CPU_FLAGS = 0;
+unsigned int CPU_FLAGS = 0;
 int CPU_ARCHITECTURE = CPU_ARCHITECTURE_ARM64;
-int CPU_SPEED = 0;
+double CPU_SPEED = 3000.0;
 int CPU_FAMILY = 8;
 int CPU_MODEL = 0;
 int CPU_STEPPING = 0;
@@ -30,12 +30,21 @@ int NUM_CPUS = 1;
 int NUM_CORES = 1;
 int NUM_THREADS = 1;
 int HYPERTHREADING = 0;
-int CPU_L2_CACHE_SIZE = 0;
-int CPU_TOTAL_L2_CACHE_SIZE = 0;
+int CPU_L1_CACHE_SIZE = 64;
+int CPU_L2_CACHE_SIZE = 4096;
 int CPU_L3_CACHE_SIZE = 0;
-char CPU_BRAND[128] = "ARM64";
+int CPU_L1_CACHE_LINE_SIZE = 128;
+int CPU_L2_CACHE_LINE_SIZE = 128;
+int CPU_L3_CACHE_LINE_SIZE = 0;
+int CPU_L1_DATA_TLBS = 0;
+int CPU_L2_DATA_TLBS = 0;
+int CPU_L3_DATA_TLBS = 0;
+int CPU_L1_SET_ASSOCIATIVE = 0;
+int CPU_L2_SET_ASSOCIATIVE = 0;
+int CPU_L3_SET_ASSOCIATIVE = 0;
+int CPU_TOTAL_L2_CACHE_SIZE = 4096;
+char CPU_BRAND[49] = "ARM64";
 
-/* Compatibility globals used elsewhere in gwnum/Prime95 code paths. */
 unsigned int CPU_CORES = 1;
 unsigned int CPU_HYPERTHREADS = 1;
 unsigned int CPU_SIGNATURE = 0;
