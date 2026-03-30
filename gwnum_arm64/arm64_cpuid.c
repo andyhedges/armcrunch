@@ -222,6 +222,13 @@ const char *cpu_brand_string(void) {
 	return CPU_BRAND;
 }
 
+void guessCpuSpeed(void) {
+	arm64_detect_cpu();
+}
+
+void fpu_init(void) {
+}
+
 #if defined(__GNUC__)
 __attribute__((constructor))
 static void arm64_cpuid_constructor(void) {
