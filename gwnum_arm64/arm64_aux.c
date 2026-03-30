@@ -2,6 +2,7 @@
 #include "gwtables.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #if defined(__aarch64__) || defined(ARM64)
@@ -51,6 +52,7 @@ static void arm64_vec_sub(double *dst, const double *src, size_t words) {
 #endif
 
 void arm64_gw_addq(struct gwasm_data *asm_data) {
+	static int addq_count = 0;
 	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
@@ -62,11 +64,18 @@ void arm64_gw_addq(struct gwasm_data *asm_data) {
 	words = arm64_aux_words(ad);
 	if (dst == NULL || src == NULL || words == 0) return;
 
+	addq_count++;
+	if (addq_count <= 3) fprintf(stderr, "[ARM64 ADDQ #%d] words=%zu\n", addq_count, words);
+
 	arm64_vec_add(dst, src, words);
 }
 
 void arm64_gw_add(struct gwasm_data *asm_data) {
+	static int add_count = 0;
 	struct gwasm_data *ad = asm_data;
+
+	add_count++;
+	if (add_count <= 3) fprintf(stderr, "[ARM64 ADD #%d]\n", add_count);
 
 	arm64_gw_addq(asm_data);
 
@@ -157,6 +166,7 @@ void arm64_gw_addsub(struct gwasm_data *asm_data) {
 }
 
 void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
+	static int copy_count = 0;
 	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
@@ -165,6 +175,9 @@ void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
 	dst = (double *)ad->DESTARG;
 	src = arm64_aux_source(ad);
 	if (dst == NULL || src == NULL) return;
+
+	copy_count++;
+	if (copy_count <= 3) fprintf(stderr, "[ARM64 COPY4KB #%d]\n", copy_count);
 
 #if defined(__aarch64__) || defined(ARM64)
 	{
@@ -182,6 +195,7 @@ void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
 }
 
 void arm64_gw_muls(struct gwasm_data *asm_data) {
+	static int muls_count = 0;
 	struct gwasm_data *ad = asm_data;
 	double *dst;
 	double *src;
@@ -193,6 +207,9 @@ void arm64_gw_muls(struct gwasm_data *asm_data) {
 	src = arm64_aux_source(ad);
 	words = arm64_aux_words(ad);
 	if (dst == NULL || words == 0) return;
+
+	muls_count++;
+	if (muls_count <= 3) fprintf(stderr, "[ARM64 MULS #%d] words=%zu mul=%.6g\n", muls_count, words, arm64_mulconst(ad));
 
 	if (src != NULL && src != dst) {
 		memmove(dst, src, words * sizeof(double));

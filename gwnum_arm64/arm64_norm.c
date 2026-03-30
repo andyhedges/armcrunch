@@ -2,6 +2,7 @@
 #include "gwtables.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stddef.h>
 
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
@@ -22,6 +23,7 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 }
 
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
+	static int norm_count = 0;
 	struct gwasm_data *ad = asm_data;
 	size_t words;
 	size_t word;
@@ -36,6 +38,17 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 	words = arm64_data_words(ad);
 	if (words == 0) return;
+
+	norm_count++;
+	if (norm_count <= 5) {
+		size_t k;
+		fprintf(stderr, "[ARM64 NORM #%d] words=%zu errchk=%d mulconst_mode=%d\n",
+			norm_count, words, errchk, mulconst_mode);
+		fprintf(stderr, "[ARM64 NORM #%d] pre-norm scrambled[0..3]: ", norm_count);
+		for (k = 0; k < 4 && k < words; k++)
+			fprintf(stderr, "%.6g ", arm64_load_scrambled_word(ad, buffer, k));
+		fprintf(stderr, "\n");
+	}
 
 	maxerr = ad->MAXERR;
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);

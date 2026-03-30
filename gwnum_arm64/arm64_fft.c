@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #if defined(__aarch64__) || defined(ARM64)
@@ -445,6 +446,7 @@ static void arm64_normalize(struct gwasm_data *asm_data) {
 }
 
 void arm64_fft_entry(struct gwasm_data *asm_data) {
+	static int fft_call_count = 0;
 	struct gwasm_data *ad = asm_data;
 	double *dest;
 	double *s1;
@@ -464,6 +466,20 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	if (words == 0u || (words & 1u) != 0u) return;
 
 	complex_len = words / 2u;
+
+	fft_call_count++;
+	if (fft_call_count <= 5) {
+		size_t k;
+		fprintf(stderr, "[ARM64 FFT #%d] ffttype=%d FFTLEN=%u words=%zu\n",
+			fft_call_count, (int)(unsigned char)ad->ffttype, ad->FFTLEN, words);
+		fprintf(stderr, "[ARM64 FFT #%d] DESTARG=%p FFTSRC dist=%ld MULSRC dist=%ld\n",
+			fft_call_count, (void*)dest, (long)ad->DIST_TO_FFTSRCARG, (long)ad->DIST_TO_MULSRCARG);
+		fprintf(stderr, "[ARM64 FFT #%d] input scrambled[0..7]: ", fft_call_count);
+		for (k = 0; k < 8 && k < words; k++)
+			fprintf(stderr, "%.6g ", arm64_load_scrambled_word(ad, dest, k));
+		fprintf(stderr, "\n");
+	}
+
 	if (!arm64_is_power_of_two(complex_len)) return;
 
 	s1 = arm64_fftsrc_ptr(ad);
