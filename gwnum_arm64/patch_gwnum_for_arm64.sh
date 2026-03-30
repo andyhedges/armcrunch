@@ -5,15 +5,6 @@
 #
 # This script reads the original gwnum sources and writes patched copies
 # to the output directory. The originals are not modified.
-#
-# Patches applied to gwnum.c:
-#   1. Add ARM64 includes and extern declarations after gwbench.h include
-#   2. Guard x86 assembly extern declarations (lines 113-440) with #if !ARM64
-#   3. Replace gwinfo1() call with arm64_gwinfo_hook() on ARM64
-#   4. Insert arm64_skip_version_check label before version sprintf
-#   5. Guard fpu_init() call
-#   6. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
-#   7. Guard pass1/pass2_aux_entry_point declarations
 
 set -euo pipefail
 
@@ -25,10 +16,8 @@ mkdir -p "$OUT_DIR"
 
 echo "Patching gwnum.c for ARM64..."
 
-# We apply patches via a Python script for more reliable multi-line editing
 python3 - "$GWNUM_SRC/gwnum.c" "$OUT_DIR/gwnum.c" << 'PYSCRIPT'
 import sys
-import re
 
 src_path = sys.argv[1]
 dst_path = sys.argv[2]
@@ -40,9 +29,7 @@ out = []
 i = 0
 n = len(lines)
 
-# State tracking
 in_x86_externs = False
-x86_extern_start = False
 gwprocptrs_else_open = False
 
 while i < n:
@@ -62,6 +49,11 @@ while i < n:
 
     # 2. Guard x86 assembly extern declarations block
     # Start: #define extern_decl(name)
+    # End: "/* Helper macros */" comment (the first line AFTER all prctab code)
+    # This covers: extern_decl macro, aux_decl macros, all prctab arrays,
+    # all explode macros, and all prctab_index functions.
+    # It does NOT cover: is_valid_double, GWINIT_WAS_CALLED_VALUE, GWFREEABLE,
+    # or the forward declarations of internal_gwsetup, multithread_init, etc.
     if line.startswith('#define extern_decl(name)') and not in_x86_externs:
         out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
         out.append(line)
@@ -69,15 +61,40 @@ while i < n:
         i += 1
         continue
 
-    # End: void pass2_aux_entry_point
-    if in_x86_externs and 'pass2_aux_entry_point' in line:
-        out.append(line)
+    if in_x86_externs and '/* Helper macros */' in line:
         out.append('#endif /* !ARM64 - x86 assembly externs */\n')
+        out.append('\n')
+        out.append(line)
         in_x86_externs = False
         i += 1
         continue
 
-    # 3. Replace gwinfo1(&asm_info) with ARM64 hook
+    # 3. Guard the original gwinfo1 declaration and provide ARM64 stubs
+    # for pass1/pass2_aux_entry_point (which are x86 assembly in the original)
+    if line.strip().startswith('void gwinfo1 (struct gwinfo1_data'):
+        out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
+        out.append(line)
+        out.append('#endif\n')
+        i += 1
+        continue
+
+    # Guard pass1_aux_entry_point and pass2_aux_entry_point forward declarations
+    # and provide no-op stubs on ARM64 (the ARM64 backend doesn't use these)
+    if line.strip().startswith('void pass1_aux_entry_point'):
+        out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
+        out.append(line)
+        i += 1
+        # Also grab pass2_aux_entry_point on the next line
+        if i < n and 'pass2_aux_entry_point' in lines[i]:
+            out.append(lines[i])
+            i += 1
+        out.append('#else\n')
+        out.append('static inline void pass1_aux_entry_point(void *d) { (void)d; }\n')
+        out.append('static inline void pass2_aux_entry_point(void *d) { (void)d; }\n')
+        out.append('#endif\n')
+        continue
+
+    # 4. Replace gwinfo1(&asm_info) call with ARM64 hook
     if 'gwinfo1 (&asm_info);' in line and 'gwinfo1' in line:
         indent = line[:len(line) - len(line.lstrip())]
         out.append('#if defined(ARM64) || defined(__aarch64__)\n')
@@ -90,7 +107,7 @@ while i < n:
         i += 1
         continue
 
-    # 4. Insert arm64_skip_version_check label before version sprintf
+    # 5. Insert arm64_skip_version_check label before version sprintf
     if 'sprintf (buf, "%d.%d", asm_info.version' in line:
         out.append('#if defined(ARM64) || defined(__aarch64__)\n')
         out.append('arm64_skip_version_check:;\n')
@@ -99,16 +116,15 @@ while i < n:
         i += 1
         continue
 
-    # 5. Guard fpu_init()
+    # 6. Guard fpu_init()
     if 'fpu_init ()' in line and '#' not in line:
-        indent = line[:len(line) - len(line.lstrip())]
         out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
         out.append(line)
         out.append('#endif\n')
         i += 1
         continue
 
-    # 6. Insert arm64_gwsetup_hook before x86 GWPROCPTRS assignment block
+    # 7. Insert arm64_gwsetup_hook before x86 GWPROCPTRS assignment block
     if '/* Set the procedure pointers from the proc tables */' in line:
         out.append(line)
         out.append('\n')
@@ -119,7 +135,7 @@ while i < n:
         i += 1
         continue
 
-    # Close the ARM64 #else block after the x87 #endif, before "Default normalization"
+    # Close the ARM64 #else block before "Default normalization"
     if gwprocptrs_else_open and '/* Default normalization routines and behaviors */' in line:
         out.append('#endif /* !ARM64 - GWPROCPTRS */\n')
         out.append('\n')
