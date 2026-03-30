@@ -16,16 +16,26 @@ ARM64_SRC  ?= .
 BUILD_DIR  ?= build/macarm64
 PATCHED_DIR = $(BUILD_DIR)/patched
 
-CFLAGS   = -arch arm64 -O2 -std=gnu99 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC)
-CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC)
+CFLAGS   = -arch arm64 -O2 -std=gnu99 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR)
+CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR)
 
-# Core gwnum sources (compiled from patched copies)
-PATCHED_C_NAMES   = gwnum gwtables gwini gwbench gwutil giants radix cpuid
-PATCHED_CPP_NAMES = gwthread gwdbldbl
-PATCHED_C_OBJS    = $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(PATCHED_C_NAMES)))
-PATCHED_CPP_OBJS  = $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(PATCHED_CPP_NAMES)))
+LIB = gwnum.a
 
-# ARM64 backend sources
+# Object files
+PATCHED_C_OBJS = \
+	$(BUILD_DIR)/gwnum.o \
+	$(BUILD_DIR)/gwtables.o \
+	$(BUILD_DIR)/gwini.o \
+	$(BUILD_DIR)/gwbench.o \
+	$(BUILD_DIR)/gwutil.o \
+	$(BUILD_DIR)/giants.o \
+	$(BUILD_DIR)/radix.o \
+	$(BUILD_DIR)/cpuid.o
+
+PATCHED_CPP_OBJS = \
+	$(BUILD_DIR)/gwthread.o \
+	$(BUILD_DIR)/gwdbldbl.o
+
 ARM64_OBJS = \
 	$(BUILD_DIR)/arm64_gwinfo.o \
 	$(BUILD_DIR)/arm64_fft.o \
@@ -34,7 +44,9 @@ ARM64_OBJS = \
 	$(BUILD_DIR)/gwnum_arm64_integration.o
 
 ALL_OBJS = $(PATCHED_C_OBJS) $(PATCHED_CPP_OBJS) $(ARM64_OBJS)
-LIB = gwnum.a
+
+# Stamp file that indicates patching is done
+PATCH_STAMP = $(PATCHED_DIR)/.patched
 
 all: $(LIB)
 
@@ -42,34 +54,76 @@ $(LIB): $(ALL_OBJS)
 	$(AR) -rs $@ $^
 	$(RANLIB) $@
 
-# Patch gwnum sources for ARM64 before compiling
-$(PATCHED_DIR)/.patched: $(ARM64_SRC)/patch_gwnum_for_arm64.sh | $(BUILD_DIR)
-	$(ARM64_SRC)/patch_gwnum_for_arm64.sh $(GWNUM_SRC) $(PATCHED_DIR)
-	touch $@
+# --- Patching step ---
+# This must complete before any patched source is compiled.
+# All patched object rules depend on PATCH_STAMP.
 
-$(BUILD_DIR):
+$(PATCH_STAMP):
 	mkdir -p $(BUILD_DIR)
+	mkdir -p $(PATCHED_DIR)
+	$(ARM64_SRC)/patch_gwnum_for_arm64.sh $(GWNUM_SRC) $(PATCHED_DIR)
+	touch $(PATCH_STAMP)
 
-# Compile patched C sources
-$(BUILD_DIR)/%.o: $(PATCHED_DIR)/%.c $(PATCHED_DIR)/.patched | $(BUILD_DIR)
+# --- Patched C source compilation ---
+# Each object depends on the patch stamp to ensure sources exist.
+
+$(BUILD_DIR)/gwnum.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/gwnum.c -o $@
+
+$(BUILD_DIR)/gwtables.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/gwtables.c -o $@
+
+$(BUILD_DIR)/gwini.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/gwini.c -o $@
+
+$(BUILD_DIR)/gwbench.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/gwbench.c -o $@
+
+$(BUILD_DIR)/gwutil.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/gwutil.c -o $@
+
+$(BUILD_DIR)/giants.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/giants.c -o $@
+
+$(BUILD_DIR)/radix.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/radix.c -o $@
+
+$(BUILD_DIR)/cpuid.o: $(PATCH_STAMP)
+	$(CC) $(CFLAGS) -c $(PATCHED_DIR)/cpuid.c -o $@
+
+# --- Patched C++ source compilation ---
+
+$(BUILD_DIR)/gwthread.o: $(PATCH_STAMP)
+	$(CPP) $(CPPFLAGS_CXX) -c $(PATCHED_DIR)/gwthread.cpp -o $@
+
+$(BUILD_DIR)/gwdbldbl.o: $(PATCH_STAMP)
+	$(CPP) $(CPPFLAGS_CXX) -c $(PATCHED_DIR)/gwdbldbl.cpp -o $@
+
+# --- ARM64 backend module compilation ---
+
+$(BUILD_DIR)/arm64_gwinfo.o: $(ARM64_SRC)/arm64_gwinfo.c $(ARM64_SRC)/arm64_asm_data.h
+	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Compile patched C++ sources
-$(BUILD_DIR)/gwthread.o: $(PATCHED_DIR)/gwthread.cpp $(PATCHED_DIR)/.patched | $(BUILD_DIR)
-	$(CPP) $(CPPFLAGS_CXX) -c $< -o $@
-
-$(BUILD_DIR)/gwdbldbl.o: $(PATCHED_DIR)/gwdbldbl.cpp $(PATCHED_DIR)/.patched | $(BUILD_DIR)
-	$(CPP) $(CPPFLAGS_CXX) -c $< -o $@
-
-# Compile ARM64 backend modules
-$(BUILD_DIR)/arm64_%.o: $(ARM64_SRC)/arm64_%.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
+$(BUILD_DIR)/arm64_fft.o: $(ARM64_SRC)/arm64_fft.c $(ARM64_SRC)/arm64_asm_data.h
+	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/gwnum_arm64_integration.o: $(ARM64_SRC)/gwnum_arm64_integration.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
+$(BUILD_DIR)/arm64_aux.o: $(ARM64_SRC)/arm64_aux.c $(ARM64_SRC)/arm64_asm_data.h
+	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Convenience target to just patch without building
-patch: $(PATCHED_DIR)/.patched
+$(BUILD_DIR)/arm64_norm.o: $(ARM64_SRC)/arm64_norm.c $(ARM64_SRC)/arm64_asm_data.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/gwnum_arm64_integration.o: $(ARM64_SRC)/gwnum_arm64_integration.c $(ARM64_SRC)/arm64_asm_data.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# --- Convenience targets ---
+
+patch: $(PATCH_STAMP)
 
 clean:
 	rm -rf $(BUILD_DIR)
