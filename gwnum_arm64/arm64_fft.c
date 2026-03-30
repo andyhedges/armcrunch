@@ -325,31 +325,59 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 	*(double *)ptr = value;
 }
 
+static int arm64_unscramble_to_linear(
+	const struct gwasm_data *ad,
+	const double *src,
+	double *dst_linear)
+{
+	size_t words;
+	size_t j;
+
+	if (ad == NULL || src == NULL || dst_linear == NULL) return 0;
+
+	words = arm64_data_words(ad);
+	if (words == 0u) return 0;
+
+	for (j = 0; j < words; ++j) {
+		dst_linear[j] = arm64_load_scrambled_word(ad, src, j);
+	}
+
+	return 1;
+}
+
+static int arm64_rescramble_from_linear(
+	const struct gwasm_data *ad,
+	const double *src_linear,
+	double *dst)
+{
+	size_t words;
+	size_t j;
+
+	if (ad == NULL || src_linear == NULL || dst == NULL) return 0;
+
+	words = arm64_data_words(ad);
+	if (words == 0u) return 0;
+
+	for (j = 0; j < words; ++j) {
+		arm64_store_scrambled_word(ad, dst, j, src_linear[j]);
+	}
+
+	return 1;
+}
+
 static int arm64_pack_scrambled_to_complex(
 	const struct gwasm_data *ad,
 	const double *src,
 	double *dst_complex)
 {
 	size_t words;
-	size_t half;
-	size_t k;
 
 	if (ad == NULL || src == NULL || dst_complex == NULL) return 0;
 
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return 0;
-	half = words / 2u;
 
-	for (k = 0; k < half; ++k) {
-		size_t imag_word = k + half;
-		double re = arm64_load_scrambled_word(ad, src, k);
-		double im = arm64_load_scrambled_word(ad, src, imag_word);
-
-		dst_complex[2u * k] = re;
-		dst_complex[2u * k + 1u] = im;
-	}
-
-	return 1;
+	return arm64_unscramble_to_linear(ad, src, dst_complex);
 }
 
 static int arm64_unpack_complex_to_scrambled(
@@ -358,21 +386,13 @@ static int arm64_unpack_complex_to_scrambled(
 	double *dst)
 {
 	size_t words;
-	size_t half;
-	size_t k;
 
 	if (ad == NULL || src_complex == NULL || dst == NULL) return 0;
 
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return 0;
-	half = words / 2u;
 
-	for (k = 0; k < half; ++k) {
-		arm64_store_scrambled_word(ad, dst, k, src_complex[2u * k]);
-		arm64_store_scrambled_word(ad, dst, k + half, src_complex[2u * k + 1u]);
-	}
-
-	return 1;
+	return arm64_rescramble_from_linear(ad, src_complex, dst);
 }
 
 static void arm64_pointwise_mul(double *dst, const double *a, const double *b, size_t complex_len) {
