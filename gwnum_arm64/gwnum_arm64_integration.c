@@ -18,6 +18,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdint.h>
 #include "cpuid.h"
 #include "gwnum.h"
@@ -248,4 +249,67 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	   computation and big/small word classification. */
 	ac->NEON_N = gwdata->n;
 	ac->NEON_NUM_B_PER_SMALL_WORD = gwdata->NUM_B_PER_SMALL_WORD;
+
+	{
+		long val_out = 0;
+		int err;
+		gwnum test_g;
+
+		fprintf(stderr, "[ARM64 SETUP] FFTLEN=%lu b=%lu n=%lu c=%ld k=%.1f\n",
+			gwdata->FFTLEN, gwdata->b, gwdata->n, gwdata->c, gwdata->k);
+		fprintf(stderr, "[ARM64 SETUP] FFT_TYPE=%d RATIONAL=%d NEGACYCLIC=%d ZERO_PADDED=%d\n",
+			gwdata->FFT_TYPE, gwdata->RATIONAL_FFT, gwdata->NEGACYCLIC_FFT, gwdata->ZERO_PADDED_FFT);
+		fprintf(stderr, "[ARM64 SETUP] cpu_flags=0x%x NUM_B_PER_SMALL=%lu avg_b_per_word=%.6f\n",
+			gwdata->cpu_flags, gwdata->NUM_B_PER_SMALL_WORD, gwdata->avg_num_b_per_word);
+		fprintf(stderr, "[ARM64 SETUP] datasize=%lu EXTRA_BITS=%.4f bit_length=%.2f\n",
+			gwdata->datasize, (double)gwdata->EXTRA_BITS, gwdata->bit_length);
+		fprintf(stderr, "[ARM64 SETUP] small_base=%.1f big_base=%.1f\n", ac->NEON_SMALL_BASE, ac->NEON_LARGE_BASE);
+		fprintf(stderr, "[ARM64 SETUP] PASS1_SIZE=%lu PASS2_SIZE=%lu FOURKBGAPSIZE=%ld\n",
+			gwdata->PASS1_SIZE, gwdata->PASS2_SIZE, gwdata->FOURKBGAPSIZE);
+		fprintf(stderr, "[ARM64 SETUP] asm_data->FFTLEN=%u B_IS_2=%d RATIONAL_FFT=%d\n",
+			ad->FFTLEN, ad->B_IS_2, ad->RATIONAL_FFT);
+		fprintf(stderr, "[ARM64 SETUP] norm_col_mults=%p norm_grp_mults=%p sincos1=%p\n",
+			(void*)ad->norm_col_mults, (void*)ad->norm_grp_mults, (void*)ad->sincos1);
+		fprintf(stderr, "[ARM64 SETUP] XMM_BIGVAL=%.6g XMM_LIMIT_INV[0]=%.10g XMM_LIMIT_INV[1]=%.10g\n",
+			ad->u.xmm.XMM_BIGVAL[0], ad->u.xmm.XMM_LIMIT_INVERSE[0], ad->u.xmm.XMM_LIMIT_INVERSE[1]);
+		fprintf(stderr, "[ARM64 SETUP] XMM_LIMIT_BIGMAX[0]=%.6g XMM_LIMIT_BIGMAX[1]=%.6g\n",
+			ad->u.xmm.XMM_LIMIT_BIGMAX[0], ad->u.xmm.XMM_LIMIT_BIGMAX[1]);
+
+		fprintf(stderr, "[ARM64 SETUP] addr_offset[0..7]: ");
+		{
+			unsigned long j;
+			for (j = 0; j < 8 && j < gwdata->FFTLEN; j++)
+				fprintf(stderr, "%lu ", addr_offset(gwdata, j));
+		}
+		fprintf(stderr, "\n");
+
+		test_g = gwalloc(gwdata);
+		if (test_g != NULL) {
+			set_fft_value(gwdata, test_g, 0, 3);
+			err = get_fft_value(gwdata, test_g, 0, &val_out);
+			fprintf(stderr, "[ARM64 SETUP] Round-trip: set_fft_value(0,3) -> get_fft_value(0) = %ld (err=%d)\n",
+				val_out, err);
+			if (val_out != 3) {
+				double raw = *addr(gwdata, test_g, 0);
+				double weight = gwfft_weight_sloppy(gwdata->dd_data, 0);
+				double inv_weight = gwfft_weight_inverse_sloppy(gwdata->dd_data, 0);
+				fprintf(stderr, "[ARM64 SETUP] MISMATCH: raw=%.15g weight=%.15g inv_weight=%.15g raw*inv=%.15g\n",
+					raw, weight, inv_weight, raw * inv_weight);
+			}
+			set_fft_value(gwdata, test_g, 1, 1);
+			err = get_fft_value(gwdata, test_g, 1, &val_out);
+			fprintf(stderr, "[ARM64 SETUP] Round-trip: set_fft_value(1,1) -> get_fft_value(1) = %ld (err=%d)\n",
+				val_out, err);
+			if (val_out != 1) {
+				double raw = *addr(gwdata, test_g, 1);
+				double weight = gwfft_weight_sloppy(gwdata->dd_data, 1);
+				double inv_weight = gwfft_weight_inverse_sloppy(gwdata->dd_data, 1);
+				fprintf(stderr, "[ARM64 SETUP] MISMATCH w1: raw=%.15g weight=%.15g inv_weight=%.15g raw*inv=%.15g\n",
+					raw, weight, inv_weight, raw * inv_weight);
+			}
+			gwfree(gwdata, test_g);
+		} else {
+			fprintf(stderr, "[ARM64 SETUP] gwalloc returned NULL!\n");
+		}
+	}
 }
