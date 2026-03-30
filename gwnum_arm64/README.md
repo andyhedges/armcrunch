@@ -1,54 +1,69 @@
 # gwnum ARM64 backend (Apple Silicon)
 
-This directory contains a C/NEON ARM64 backend for gwnum that replaces the x86 assembly dispatch path with ARM64 entry points.
+This directory contains a C/NEON ARM64 backend for gwnum that replaces the x86 assembly dispatch path with ARM64 entry points, enabling PRST and other gwnum-based programs to run natively on Apple Silicon.
 
 ## Contents
 
-- `arm64_cpuid.c` - ARM64 CPU detection (macOS sysctl + Linux fallback)
-- `arm64_gwinfo.c` - `gwinfo1()` replacement and ARM64 jmptab tables
-- `arm64_fft.c` - GWPROCPTRS[0] FFT dispatcher + one-pass FFT/mul/square path
-- `arm64_aux.c` - GWPROCPTRS[1..8] add/sub/addsub/copy/muls routines
-- `arm64_norm.c` - GWPROCPTRS[9..12] normalization variants
-- `arm64_asm_data.h` - ARM64 asm_data union/view definitions and helpers
-- `gwnum_arm64.patch` - minimal `gwnum.c` integration patch outline
-- `makemacarm64` - static library build file for `gwnum.a` on arm64 macOS
+| File | Purpose |
+|------|---------|
+| `arm64_asm_data.h` | ARM64 asm_data union/view definitions, helper accessors, routine prototypes |
+| `arm64_cpuid.c` | ARM64 CPU detection (macOS sysctl + Linux /proc/cpuinfo fallback) |
+| `arm64_gwinfo.c` | `gwinfo1()` replacement with ARM64 jmptab tables (1K–32K one-pass FFTs) |
+| `arm64_fft.c` | GWPROCPTRS[0]: FFT dispatcher with radix-4 forward/inverse, IBDWT weighting, pointwise mul/square, ffttype 1–5 |
+| `arm64_aux.c` | GWPROCPTRS[1–8]: add/sub/addsub (quick + normalized), 4KB copy, small-constant multiply |
+| `arm64_norm.c` | GWPROCPTRS[9–12]: normalization with inverse weighting, rounding, carry propagation, error check, mulbyconst |
+| `gwnum_arm64_integration.c` | Hook functions for gwnum.c (`arm64_gwinfo_hook`, `arm64_gwsetup_hook`) |
+| `patch_gwnum_for_arm64.sh` | Build-time script that patches gwnum.c with `#ifdef ARM64` blocks |
+| `makemacarm64` | Makefile for building `gwnum.a` on arm64 macOS |
 
 ## Build gwnum.a for macOS ARM64
 
-From `armcrunch/gwnum_arm64/`:
+The build process patches gwnum.c at build time (the original is not modified), then compiles the patched core sources alongside the ARM64 backend modules.
 
 ```bash
+cd armcrunch/gwnum_arm64
 make -f makemacarm64
 ```
 
-This produces `gwnum.a` in the same directory.
+This produces `gwnum.a` in the current directory.
 
-Environment overrides:
-
-- `GWNUM_SRC=/path/to/gwnum/sources`
-- `BUILD_DIR=/custom/build/path`
+The patch script (`patch_gwnum_for_arm64.sh`) applies these changes to gwnum.c:
+1. Adds `#include "arm64_asm_data.h"` and ARM64 hook declarations
+2. Guards all x86 assembly extern declarations with `#if !defined(ARM64)`
+3. Replaces `gwinfo1()` call with `arm64_gwinfo_hook()` on ARM64
+4. Replaces x86 GWPROCPTRS assignment with `arm64_gwsetup_hook()` on ARM64
+5. Guards `fpu_init()` call (no-op on ARM64)
 
 ## PRST integration
 
-A companion ARM64 makefile is provided at:
+A companion ARM64 makefile is provided at `prst/src/macarm64/Makefile`.
 
-- `prst/src/macarm64/Makefile`
+```bash
+# 1. Build gwnum.a
+cd armcrunch/gwnum_arm64
+make -f makemacarm64
 
-It links against:
+# 2. Install gwnum.a into PRST framework
+mkdir -p /path/to/prst/framework/gwnum/macarm64
+cp gwnum.a /path/to/prst/framework/gwnum/macarm64/
 
-- `../../framework/gwnum/macarm64/gwnum.a`
+# 3. Build PRST
+cd prst/src/macarm64
+make
+```
 
-## Architecture choices
+## Architecture
 
-- Backend uses C + NEON intrinsics (`arm_neon.h`) for portability and maintainability.
-- FFT path supports one-pass contiguous layouts for 1K..32K complex points.
-- IBDWT weighting is applied in forward FFT (`arm64_forward_weight_at`), and inverse weighting is applied during normalization.
-- Carry propagation and roundoff tracking are implemented in the normalization path.
-- All 13 required GWPROCPTRS slots are implemented and installed by `arm64_install_gwprocptrs()`.
+- All 13 GWPROCPTRS entry points are implemented in C with NEON intrinsics (`arm_neon.h`).
+- FFT uses radix-4 DIT (forward) and radix-4 DIF (inverse) with bit-reversal permutation.
+- IBDWT pre-weighting is applied during forward FFT; inverse weighting during normalization.
+- Carry propagation and roundoff error tracking are in the normalization path.
+- NEON vectorization is used for pointwise multiply, add/sub, scaling, and copy operations.
+- Hot inner loops can be replaced with hand-tuned assembly later for further optimization.
 
-## Current status / limitations
+## Current limitations
 
-- Focused on one-pass kernels (no dedicated two-pass PASS2 microkernels yet).
-- Twiddle usage prefers gwnum sin/cos tables when provided, with trig fallback for completeness.
-- Inner loops are NEON-vectorized where practical; hand-tuned assembly can be added later for hot spots.
-- The provided patch file intentionally keeps integration changes minimal and isolated with `#ifdef ARM64`.
+- One-pass FFT kernels only (1K–32K complex points). Two-pass support for larger sizes is not yet implemented.
+- Twiddle factors use computed trig when gwnum sin/cos tables are not populated.
+- Single-threaded (no pass1/pass2 auxiliary thread dispatch yet).
+- Not yet tested end-to-end with PRST (requires an ARM64 macOS build environment).

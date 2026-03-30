@@ -1,45 +1,75 @@
 # Makefile for building gwnum.a on Apple Silicon (arm64 macOS)
+#
+# Usage:
+#   make -f makemacarm64
+#
+# The build first patches gwnum.c for ARM64 (via patch_gwnum_for_arm64.sh),
+# then compiles the patched core sources alongside the ARM64 backend modules.
 
 CC      = clang
+CPP     = clang++
 AR      = ar
 RANLIB  = ranlib
 
-GWNUM_SRC ?= ../reference/prime95/gwnum
-ARM64_SRC ?= .
-BUILD_DIR ?= build/macarm64
+GWNUM_SRC  ?= ../reference/prime95/gwnum
+ARM64_SRC  ?= .
+BUILD_DIR  ?= build/macarm64
+PATCHED_DIR = $(BUILD_DIR)/patched
 
-CFLAGS = -arch arm64 -O2 -std=gnu99 -DARM64 -D__aarch64__ -I$(GWNUM_SRC) -I$(ARM64_SRC)
-LDFLAGS = -arch arm64
+CFLAGS   = -arch arm64 -O2 -std=gnu99 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC)
+CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 -I$(GWNUM_SRC) -I$(ARM64_SRC)
 
-COMMON_NAMES = gwnum gwtables gwthread gwini gwbench gwutil gwdbldbl giants radix
-COMMON_OBJS  = $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(COMMON_NAMES)))
+# Core gwnum sources (compiled from patched copies)
+PATCHED_C_NAMES   = gwnum gwtables gwini gwbench gwutil giants radix cpuid
+PATCHED_CPP_NAMES = gwthread gwdbldbl
+PATCHED_C_OBJS    = $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(PATCHED_C_NAMES)))
+PATCHED_CPP_OBJS  = $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(PATCHED_CPP_NAMES)))
 
+# ARM64 backend sources
 ARM64_OBJS = \
-	$(BUILD_DIR)/cpuid.o \
 	$(BUILD_DIR)/arm64_gwinfo.o \
 	$(BUILD_DIR)/arm64_fft.o \
 	$(BUILD_DIR)/arm64_aux.o \
-	$(BUILD_DIR)/arm64_norm.o
+	$(BUILD_DIR)/arm64_norm.o \
+	$(BUILD_DIR)/gwnum_arm64_integration.o
 
+ALL_OBJS = $(PATCHED_C_OBJS) $(PATCHED_CPP_OBJS) $(ARM64_OBJS)
 LIB = gwnum.a
 
 all: $(LIB)
 
-$(LIB): $(COMMON_OBJS) $(ARM64_OBJS)
+$(LIB): $(ALL_OBJS)
 	$(AR) -rs $@ $^
 	$(RANLIB) $@
+
+# Patch gwnum sources for ARM64 before compiling
+$(PATCHED_DIR)/.patched: $(ARM64_SRC)/patch_gwnum_for_arm64.sh | $(BUILD_DIR)
+	$(ARM64_SRC)/patch_gwnum_for_arm64.sh $(GWNUM_SRC) $(PATCHED_DIR)
+	touch $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/cpuid.o: $(ARM64_SRC)/arm64_cpuid.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
+# Compile patched C sources
+$(BUILD_DIR)/%.o: $(PATCHED_DIR)/%.c $(PATCHED_DIR)/.patched | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Compile patched C++ sources
+$(BUILD_DIR)/gwthread.o: $(PATCHED_DIR)/gwthread.cpp $(PATCHED_DIR)/.patched | $(BUILD_DIR)
+	$(CPP) $(CPPFLAGS_CXX) -c $< -o $@
+
+$(BUILD_DIR)/gwdbldbl.o: $(PATCHED_DIR)/gwdbldbl.cpp $(PATCHED_DIR)/.patched | $(BUILD_DIR)
+	$(CPP) $(CPPFLAGS_CXX) -c $< -o $@
+
+# Compile ARM64 backend modules
 $(BUILD_DIR)/arm64_%.o: $(ARM64_SRC)/arm64_%.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: $(GWNUM_SRC)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/gwnum_arm64_integration.o: $(ARM64_SRC)/gwnum_arm64_integration.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Convenience target to just patch without building
+patch: $(PATCHED_DIR)/.patched
 
 clean:
 	rm -rf $(BUILD_DIR)
@@ -47,4 +77,4 @@ clean:
 distclean: clean
 	rm -f $(LIB)
 
-.PHONY: all clean distclean
+.PHONY: all patch clean distclean
