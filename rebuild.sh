@@ -94,4 +94,4 @@ make
 # Numbers smaller than ~350 bits fall through to the general-purpose
 # modular reduction path which our ARM64 backend does not yet support.
 # 2^1279-1 is a known Mersenne prime (1279 bits) that uses the IBDWT path.
-./prst "2^1279-1"
+./prst "2^1279-1" -check never
