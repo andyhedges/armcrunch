@@ -1,0 +1,50 @@
+# Makefile for building gwnum.a on Apple Silicon (arm64 macOS)
+
+CC      = clang
+AR      = ar
+RANLIB  = ranlib
+
+GWNUM_SRC ?= ../reference/prime95/gwnum
+ARM64_SRC ?= .
+BUILD_DIR ?= build/macarm64
+
+CFLAGS = -arch arm64 -O2 -std=gnu99 -DARM64 -D__aarch64__ -I$(GWNUM_SRC) -I$(ARM64_SRC)
+LDFLAGS = -arch arm64
+
+COMMON_NAMES = gwnum gwtables gwthread gwini gwbench gwutil gwdbldbl giants radix
+COMMON_OBJS  = $(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(COMMON_NAMES)))
+
+ARM64_OBJS = \
+	$(BUILD_DIR)/cpuid.o \
+	$(BUILD_DIR)/arm64_gwinfo.o \
+	$(BUILD_DIR)/arm64_fft.o \
+	$(BUILD_DIR)/arm64_aux.o \
+	$(BUILD_DIR)/arm64_norm.o
+
+LIB = gwnum.a
+
+all: $(LIB)
+
+$(LIB): $(COMMON_OBJS) $(ARM64_OBJS)
+	$(AR) -rs $@ $^
+	$(RANLIB) $@
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/cpuid.o: $(ARM64_SRC)/arm64_cpuid.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/arm64_%.o: $(ARM64_SRC)/arm64_%.c $(ARM64_SRC)/arm64_asm_data.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.o: $(GWNUM_SRC)/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+distclean: clean
+	rm -f $(LIB)
+
+.PHONY: all clean distclean
