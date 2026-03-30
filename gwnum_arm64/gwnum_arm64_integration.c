@@ -379,6 +379,27 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 						}
 					}
 
+					/* 5-iteration squaring test: 3 -> 9 -> 81 -> 6561 -> 43046721 -> 1853020188851841 */
+					{
+						int iter;
+						dbltogw(gwdata, 3.0, sq_g);
+						for (iter = 0; iter < 5; iter++) {
+							gwsquare2(gwdata, sq_g, sq_g, 0);
+						}
+						{
+							giant tmp_giant = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+							int conv_err = gwtogiant(gwdata, sq_g, tmp_giant);
+							uint64_t result = 0;
+							if (conv_err >= 0 && tmp_giant->sign >= 1) {
+								result = (uint64_t)tmp_giant->n[0];
+								if (tmp_giant->sign >= 2) result |= ((uint64_t)tmp_giant->n[1]) << 32;
+							}
+							fprintf(stderr, "[ARM64 SETUP] 5-iter square test: 3^32 = %llu (expected 1853020188851841, sign=%d)\n",
+								(unsigned long long)result, tmp_giant->sign);
+							pushg(&gwdata->gdata, 1);
+						}
+					}
+
 					gwfree(gwdata, sq_g);
 				}
 			}
