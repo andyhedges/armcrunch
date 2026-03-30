@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "gwnum.h"
 #include "gwtables.h"
 
 #ifdef __cplusplus
