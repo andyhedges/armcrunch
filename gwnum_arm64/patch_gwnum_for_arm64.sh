@@ -173,11 +173,19 @@ cp "$SCRIPT_DIR/arm64_cpuid.c" "$OUT_DIR/cpuid.c" 2>/dev/null || \
     echo "  Warning: arm64_cpuid.c not found at $SCRIPT_DIR, cpuid.c not replaced"
 
 echo "Copying and patching other sources..."
-for f in gwtables.c gwini.c gwbench.c gwutil.c gwdbldbl.cpp giants.c radix.c; do
+for f in gwtables.c gwini.c gwbench.c gwutil.c giants.c radix.c; do
     if [ -f "$GWNUM_SRC/$f" ]; then
         cp "$GWNUM_SRC/$f" "$OUT_DIR/$f"
     fi
 done
+
+# Patch gwdbldbl.cpp: prevent #define x86 on ARM64 (disables x87 FPU control word asm)
+if [ -f "$GWNUM_SRC/gwdbldbl.cpp" ]; then
+    sed \
+      -e 's/^#ifndef X86_64$/#if !defined(X86_64) \&\& !defined(ARM64) \&\& !defined(__aarch64__)/' \
+      "$GWNUM_SRC/gwdbldbl.cpp" > "$OUT_DIR/gwdbldbl.cpp"
+    echo "  Patched gwdbldbl.cpp (x86 FPU guard for ARM64)"
+fi
 
 # Patch gwthread.cpp: replace __builtin_ia32_pause() with ARM64 yield
 if [ -f "$GWNUM_SRC/gwthread.cpp" ]; then
