@@ -172,6 +172,12 @@ static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t
 #endif
 
 	frac = (double)frac_num / (double)fftlen;
+
+	/* gwnum's map_to_weight_power_sloppy negates the fractional part:
+	   tmp2 = 0 - tmp2, computing ceil(j*n/N) - j*n/N instead of
+	   j*n/N - floor(j*n/N). Match this by using (1 - frac). */
+	if (frac > 0.0) frac = 1.0 - frac;
+
 	weight = pow(base, frac);
 
 	if (weight == 0.0) return 1.0;
