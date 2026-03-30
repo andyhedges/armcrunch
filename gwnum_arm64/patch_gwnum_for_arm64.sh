@@ -11,9 +11,8 @@
 #   2. Guard x86 assembly extern declarations (lines 113-440) with #if !ARM64
 #   3. Replace gwinfo1() call with arm64_gwinfo_hook() on ARM64
 #   4. Insert arm64_skip_version_check label before version sprintf
-#   5. Guard fpu_init() call
-#   6. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
-#   7. Guard pass1/pass2_aux_entry_point declarations
+#   5. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
+#   6. Guard pass1/pass2_aux_entry_point declarations
 
 set -euo pipefail
 
@@ -80,8 +79,6 @@ while i < n:
         out.append('static inline void gwy3_apply_carries(void *d) { (void)d; }\n')
         out.append('static inline void prefetchL2(void *addr, int count) { (void)addr; (void)count; }\n')
         out.append('static inline void pause_for_count(int count) { (void)count; }\n')
-        out.append('static inline void guessCpuSpeed(void) { }\n')
-        out.append('static inline void fpu_init(void) { }\n')
         out.append('#endif\n')
         out.append('\n')
         out.append(line)
@@ -141,16 +138,7 @@ while i < n:
         i += 1
         continue
 
-    # 6. Guard fpu_init() call (the stub is defined above, but guard the call too
-    # to avoid "static function defined but not used" warnings on x86)
-    if 'fpu_init ()' in line and '#' not in line:
-        out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
-        out.append(line)
-        out.append('#endif\n')
-        i += 1
-        continue
-
-    # 7. Insert arm64_gwsetup_hook before x86 GWPROCPTRS assignment block
+    # 6. Insert arm64_gwsetup_hook before x86 GWPROCPTRS assignment block
     if '/* Set the procedure pointers from the proc tables */' in line:
         out.append(line)
         out.append('\n')
