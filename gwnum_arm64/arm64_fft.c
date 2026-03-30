@@ -631,11 +631,31 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		arm64_forward_fft(tmp1, complex_len);
+		if (fft_call_count <= 2) {
+			fprintf(stderr, "[ARM64 FFT #%d] post-fwd Z[0..3]: (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g)\n",
+				fft_call_count, tmp1[0], tmp1[1], tmp1[2], tmp1[3], tmp1[4], tmp1[5], tmp1[6], tmp1[7]);
+		}
 		arm64_real_fft_split(tmp1, spec1, complex_len);
+		if (fft_call_count <= 2) {
+			fprintf(stderr, "[ARM64 FFT #%d] post-split X[0..2]: (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g)\n",
+				fft_call_count, spec1[0], spec1[1], spec1[2], spec1[3], spec1[4], spec1[5]);
+		}
 		arm64_pointwise_square(spec1, spec1, complex_len + 1u);
 		arm64_real_fft_make_endpoints_real(spec1, complex_len);
+		if (fft_call_count <= 2) {
+			fprintf(stderr, "[ARM64 FFT #%d] post-square Y[0..2]: (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g)\n",
+				fft_call_count, spec1[0], spec1[1], spec1[2], spec1[3], spec1[4], spec1[5]);
+		}
 		arm64_real_fft_merge(spec1, tmp1, complex_len);
+		if (fft_call_count <= 2) {
+			fprintf(stderr, "[ARM64 FFT #%d] post-merge Z_out[0..3]: (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g) (%.6g,%.6g)\n",
+				fft_call_count, tmp1[0], tmp1[1], tmp1[2], tmp1[3], tmp1[4], tmp1[5], tmp1[6], tmp1[7]);
+		}
 		arm64_inverse_fft(tmp1, complex_len);
+		if (fft_call_count <= 2) {
+			fprintf(stderr, "[ARM64 FFT #%d] post-ifft linear[0..7]: %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g\n",
+				fft_call_count, tmp1[0], tmp1[1], tmp1[2], tmp1[3], tmp1[4], tmp1[5], tmp1[6], tmp1[7]);
+		}
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
