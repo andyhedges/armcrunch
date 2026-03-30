@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <math.h>
 #include "gwnum.h"
 #include "gwtables.h"
 
@@ -32,6 +33,8 @@ typedef struct arm64_asm_constants {
 	double NEON_ONE_OVER_B;
 	arm64_gwproc_routine NEON_CARRIES_ROUTINE;
 	arm64_gwproc_routine NEON_PASS2_ROUTINE;
+	unsigned long NEON_N;
+	unsigned long NEON_NUM_B_PER_SMALL_WORD;
 } arm64_asm_constants;
 
 /* Single active constants block populated by arm64_gwsetup_hook(). */
@@ -132,32 +135,89 @@ static inline double arm64_mulconst(const struct gwasm_data *ad) {
 }
 
 static inline double arm64_inverse_weight_at(const struct gwasm_data *ad, size_t complex_index) {
-	size_t n;
-	double inv_weight = 1.0;
-	const double *col_mults;
-	const double *grp_mults;
+	size_t fftlen;
+	const arm64_asm_constants *ac;
+	unsigned long n_exp;
+	double base;
+	size_t j;
+	unsigned long n_mod;
+	size_t frac_num;
+	double frac;
+	double weight;
 
 	if (ad == NULL) return 1.0;
-	n = arm64_complex_len(ad);
-	if (n == 0) return 1.0;
+	if (ad->RATIONAL_FFT != 0) return 1.0;
 
-	col_mults = (const double *)ad->norm_col_mults;
-	grp_mults = (const double *)ad->norm_grp_mults;
+	fftlen = arm64_complex_len(ad);
+	if (fftlen == 0) return 1.0;
 
-	if (col_mults != NULL) {
-		inv_weight *= col_mults[complex_index % n];
-	}
-	if (grp_mults != NULL) {
-		size_t group_index = 0;
-		inv_weight *= grp_mults[group_index];
-	}
-	if (inv_weight == 0.0) return 1.0;
-	return inv_weight;
+	ac = arm64_constants(ad);
+	n_exp = (ac != NULL) ? ac->NEON_N : 0ul;
+	if (n_exp == 0ul) return 1.0;
+
+	if (ad->B_IS_2 != 0) base = 2.0;
+	else if (ac != NULL && ac->NEON_B > 0.0 && ac->NEON_B != 1.0) base = ac->NEON_B;
+	else return 1.0;
+
+	j = complex_index % fftlen;
+	n_mod = n_exp % (unsigned long)fftlen;
+
+#if defined(__SIZEOF_INT128__)
+	frac_num = (size_t)(((__uint128_t)j * (__uint128_t)n_mod) % (__uint128_t)fftlen);
+#else
+	frac_num = (size_t)fmodl((long double)j * (long double)n_mod, (long double)fftlen);
+#endif
+
+	frac = (double)frac_num / (double)fftlen;
+	weight = pow(base, frac);
+
+	if (weight == 0.0) return 1.0;
+	return 1.0 / weight;
 }
 
 static inline double arm64_forward_weight_at(const struct gwasm_data *ad, size_t complex_index) {
 	double inv_weight = arm64_inverse_weight_at(ad, complex_index);
 	return inv_weight == 0.0 ? 1.0 : 1.0 / inv_weight;
+}
+
+static inline int arm64_is_big_word(const struct gwasm_data *ad, size_t word_index) {
+	const arm64_asm_constants *ac;
+	size_t fftlen;
+	unsigned long n_exp;
+	unsigned long num_b_small;
+
+	if (ad == NULL) return 0;
+	if (ad->RATIONAL_FFT != 0) return 0;
+
+	fftlen = arm64_complex_len(ad);
+	if (fftlen == 0) return 0;
+
+	ac = arm64_constants(ad);
+	n_exp = (ac != NULL) ? ac->NEON_N : 0ul;
+	if (n_exp == 0ul) {
+		return (int)((word_index >> 1u) & 1u);
+	}
+
+	num_b_small = (ac != NULL) ? ac->NEON_NUM_B_PER_SMALL_WORD : 0ul;
+	if (num_b_small == 0ul) {
+		num_b_small = n_exp / (unsigned long)fftlen;
+	}
+
+#if defined(__SIZEOF_INT128__)
+	{
+		__uint128_t lo = ((__uint128_t)word_index * (__uint128_t)n_exp) / (__uint128_t)fftlen;
+		__uint128_t hi = ((__uint128_t)(word_index + 1u) * (__uint128_t)n_exp) / (__uint128_t)fftlen;
+		__uint128_t num_b = hi - lo;
+		return (num_b > (__uint128_t)num_b_small) ? 1 : 0;
+	}
+#else
+	{
+		long double lo = floorl(((long double)word_index * (long double)n_exp) / (long double)fftlen);
+		long double hi = floorl(((long double)(word_index + 1u) * (long double)n_exp) / (long double)fftlen);
+		long double num_b = hi - lo;
+		return (num_b > (long double)num_b_small) ? 1 : 0;
+	}
+#endif
 }
 
 /* FFT entry point and auxiliary GWPROCPTRS routines */

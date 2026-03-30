@@ -36,7 +36,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 	for (word = 0; word < words; ++word) {
 		size_t complex_index = word >> 1u;
-		int big_word = (int)(complex_index & 1u);
+		int big_word = arm64_is_big_word(ad, word);
 		double base = arm64_word_base(ad, big_word);
 		double inv_base = arm64_word_base_inverse(ad, big_word);
 		double limit = arm64_word_limit(ad, big_word);

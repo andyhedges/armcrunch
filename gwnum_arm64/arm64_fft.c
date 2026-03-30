@@ -107,37 +107,24 @@ static arm64_complex arm64_twiddle(
 	size_t m,
 	int inverse_sign)
 {
-	const double *table = NULL;
+	double angle;
+	arm64_complex w;
+	(void)ad;
 
-	if (ad != NULL) {
-		if (tw_mul == 1u) table = (const double *)ad->sincos1;
-		else if (tw_mul == 2u) table = (const double *)ad->sincos2;
-		else table = (const double *)ad->sincos3;
-	}
-
-	if (table != NULL && ad != NULL) {
-		size_t n = arm64_complex_len(ad);
-		size_t period = n != 0 ? n : m;
-		size_t idx = period != 0 ? ((j * (size_t)tw_mul) % period) : 0;
-		double wr = table[idx * 2u];
-		double wi = table[idx * 2u + 1u];
-		if (inverse_sign) wi = -wi;
-		if ((wr != 0.0 || wi != 0.0) || idx == 0) {
-			arm64_complex w = { wr, wi };
-			return w;
-		}
-	}
-
-	{
-		double angle = (inverse_sign ? 2.0 : -2.0) * M_PI * (double)(tw_mul * j) / (double)m;
-		arm64_complex w = { cos(angle), sin(angle) };
+	if (m == 0u) {
+		w.r = 1.0;
+		w.i = 0.0;
 		return w;
 	}
+
+	angle = (inverse_sign ? 2.0 : -2.0) * M_PI * (double)tw_mul * (double)j / (double)m;
+	w.r = cos(angle);
+	w.i = sin(angle);
+	return w;
 }
 
 static void arm64_apply_ibdwt_preweights(const struct gwasm_data *ad, double *data, size_t n) {
 	if (ad == NULL) return;
-	if (ad->norm_col_mults == NULL && ad->norm_grp_mults == NULL) return;
 
 #if defined(__aarch64__) || defined(ARM64)
 	{

@@ -252,4 +252,9 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 
 	ac->NEON_CARRIES_ROUTINE = NULL;
 	ac->NEON_PASS2_ROUTINE = NULL;
+
+	/* Exponent and word-size metadata for first-principles IBDWT weight
+	   computation and big/small word classification. */
+	ac->NEON_N = gwdata->n;
+	ac->NEON_NUM_B_PER_SMALL_WORD = gwdata->NUM_B_PER_SMALL_WORD;
 }
