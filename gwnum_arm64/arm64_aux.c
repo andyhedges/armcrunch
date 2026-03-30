@@ -154,8 +154,6 @@ void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
 	arm64_gwasm_data_view *ad = arm64_asm_data_view(asm_data);
 	double *dst;
 	double *src;
-	size_t words = 4096u / sizeof(double);
-	size_t i;
 
 	if (ad == NULL) return;
 	dst = ad->DESTARG;
@@ -163,11 +161,15 @@ void arm64_gw_copy4kb(struct gwasm_data *asm_data) {
 	if (dst == NULL || src == NULL) return;
 
 #if defined(__aarch64__) || defined(ARM64)
-	for (i = 0; i + 1u < words; i += 2u) {
-		float64x2_t v = vld1q_f64(&src[i]);
-		vst1q_f64(&dst[i], v);
+	{
+		size_t words = 4096u / sizeof(double);
+		size_t i;
+		for (i = 0; i + 1u < words; i += 2u) {
+			float64x2_t v = vld1q_f64(&src[i]);
+			vst1q_f64(&dst[i], v);
+		}
+		if (i < words) dst[i] = src[i];
 	}
-	if (i < words) dst[i] = src[i];
 #else
 	memcpy(dst, src, 4096u);
 #endif
