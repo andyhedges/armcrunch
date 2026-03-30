@@ -186,41 +186,28 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	ac->NEON_BIGVAL = ad->u.xmm.XMM_BIGVAL[0];
 	if (ac->NEON_BIGVAL == 0.0) ac->NEON_BIGVAL = ARM64_DEFAULT_BIGVAL;
 
-	ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] = ad->u.xmm.XMM_LIMIT_INVERSE[0];
-	ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG]   = ad->u.xmm.XMM_LIMIT_INVERSE[1];
-
-	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] != 0.0)
-		small_word = 1.0 / ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL];
-	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG] != 0.0)
-		big_word = 1.0 / ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG];
-
-	if (small_word == 0.0 || big_word == 0.0) {
-		if (gwdata->b == 2) {
-			small_word = ldexp(1.0, (int)gwdata->NUM_B_PER_SMALL_WORD);
-			big_word   = small_word * 2.0;
-		} else {
-			small_word = pow((double)gwdata->b, (double)gwdata->NUM_B_PER_SMALL_WORD);
-			big_word   = small_word * (double)gwdata->b;
-		}
+	/* Always compute word bases from first principles. The SSE2
+	   XMM_LIMIT_INVERSE/XMM_LIMIT_BIGMAX arrays use a complex interleaved
+	   layout specific to the HG one-pass FFT that does NOT map to simple
+	   [small, big] indexing. */
+	if (gwdata->b == 2) {
+		small_word = ldexp(1.0, (int)gwdata->NUM_B_PER_SMALL_WORD);
+		big_word   = small_word * 2.0;
+	} else {
+		small_word = pow((double)gwdata->b, (double)gwdata->NUM_B_PER_SMALL_WORD);
+		big_word   = small_word * (double)gwdata->b;
 	}
 
 	ac->NEON_SMALL_BASE = small_word;
 	ac->NEON_LARGE_BASE = big_word;
-	ac->NEON_SMALL_BASE_INV = (small_word != 0.0) ? (1.0 / small_word) : 0.0;
-	ac->NEON_LARGE_BASE_INV = (big_word != 0.0) ? (1.0 / big_word) : 0.0;
+	ac->NEON_SMALL_BASE_INV = 1.0 / small_word;
+	ac->NEON_LARGE_BASE_INV = 1.0 / big_word;
 
-	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] == 0.0)
-		ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] = ac->NEON_SMALL_BASE_INV;
-	if (ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG] == 0.0)
-		ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG] = ac->NEON_LARGE_BASE_INV;
+	ac->NEON_LIMIT_INVERSE[ARM64_WORD_SMALL] = ac->NEON_SMALL_BASE_INV;
+	ac->NEON_LIMIT_INVERSE[ARM64_WORD_BIG]   = ac->NEON_LARGE_BASE_INV;
 
-	ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] = ad->u.xmm.XMM_LIMIT_BIGMAX[0];
-	ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG]   = ad->u.xmm.XMM_LIMIT_BIGMAX[1];
-
-	if (ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] == 0.0)
-		ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] = ac->NEON_SMALL_BASE * ac->NEON_BIGVAL - ac->NEON_BIGVAL;
-	if (ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG] == 0.0)
-		ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG] = ac->NEON_LARGE_BASE * ac->NEON_BIGVAL - ac->NEON_BIGVAL;
+	ac->NEON_LIMIT_BIGMAX[ARM64_WORD_SMALL] = small_word * ac->NEON_BIGVAL - ac->NEON_BIGVAL;
+	ac->NEON_LIMIT_BIGMAX[ARM64_WORD_BIG]   = big_word   * ac->NEON_BIGVAL - ac->NEON_BIGVAL;
 
 	ac->NEON_K_HI = ad->u.xmm.XMM_K_HI[0];
 	ac->NEON_K_LO = ad->u.xmm.XMM_K_LO[0];
