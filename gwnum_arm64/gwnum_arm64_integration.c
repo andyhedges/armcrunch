@@ -334,7 +334,6 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 						fprintf(stderr, "[ARM64 SETUP] gwsquare2 test: 3^2 = %ld (gwerror=%d, conv=%d, sign=%d)\n",
 							sq_val, sq_err, conv_err, tmp_giant->sign);
 						if (sq_val != 9) {
-							/* Dump first 8 words of the squared result */
 							unsigned long j;
 							fprintf(stderr, "[ARM64 SETUP] squared result words[0..7]: ");
 							for (j = 0; j < 8 && j < gwdata->FFTLEN; j++) {
@@ -346,6 +345,40 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 						}
 						pushg(&gwdata->gdata, 1);
 					}
+
+					/* gwsmallmul(1.0) round-trip test: store 3, multiply by 1, expect 3 */
+					dbltogw(gwdata, 3.0, sq_g);
+					gwsmallmul(gwdata, 1.0, sq_g);
+					{
+						giant tmp_giant = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						int conv_err = gwtogiant(gwdata, sq_g, tmp_giant);
+						long muls_val = -999;
+						if (conv_err >= 0 && tmp_giant->sign >= 1) muls_val = (long)tmp_giant->n[0];
+						else if (conv_err >= 0 && tmp_giant->sign == 0) muls_val = 0;
+						fprintf(stderr, "[ARM64 SETUP] gwsmallmul(1) test: 3*1 = %ld\n", muls_val);
+						pushg(&gwdata->gdata, 1);
+					}
+
+					/* gwadd3o test: store 3+3, expect 6 */
+					{
+						gwnum g2 = gwalloc(gwdata);
+						if (g2 != NULL) {
+							dbltogw(gwdata, 3.0, sq_g);
+							dbltogw(gwdata, 3.0, g2);
+							gwadd3o(gwdata, sq_g, g2, sq_g, GWADD_FORCE_NORMALIZE);
+							{
+								giant tmp_giant = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+								int conv_err = gwtogiant(gwdata, sq_g, tmp_giant);
+								long add_val = -999;
+								if (conv_err >= 0 && tmp_giant->sign >= 1) add_val = (long)tmp_giant->n[0];
+								else if (conv_err >= 0 && tmp_giant->sign == 0) add_val = 0;
+								fprintf(stderr, "[ARM64 SETUP] gwadd3o test: 3+3 = %ld\n", add_val);
+								pushg(&gwdata->gdata, 1);
+							}
+							gwfree(gwdata, g2);
+						}
+					}
+
 					gwfree(gwdata, sq_g);
 				}
 			}
