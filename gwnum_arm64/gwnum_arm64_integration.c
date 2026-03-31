@@ -309,6 +309,67 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 				pushg(&gwdata->gdata, 1);
 			}
 
+			/* Test 4: Lucas V doubling: V(2n) = V(n)^2 - 2
+			   Start with V=4, apply V -> V^2 - 2 three times:
+			   V_2=4 -> V_4=14 -> V_8=194 -> V_16=37634 */
+			{
+				gwnum lucas_g = gwalloc(gwdata);
+				if (lucas_g != NULL) {
+					gwsetaddin(gwdata, -2);
+					dbltogw(gwdata, 4.0, lucas_g);
+					gwsquare2(gwdata, lucas_g, lucas_g, GWMUL_ADDINCONST);
+					gwsquare2(gwdata, lucas_g, lucas_g, GWMUL_ADDINCONST);
+					gwsquare2(gwdata, lucas_g, lucas_g, GWMUL_ADDINCONST);
+					gwsetaddin(gwdata, 0);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, lucas_g, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 37634) {
+							fprintf(stderr, "[ARM64 DIAG] Lucas V_16(P=4) = 37634 OK\n");
+						} else {
+							fprintf(stderr, "[ARM64 DIAG] Lucas V_16(P=4) FAILED: conv=%d sign=%d",
+								conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+							fprintf(stderr, "\n");
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+					gwfree(gwdata, lucas_g);
+				}
+			}
+
+			/* Test 5: 100-iteration squaring with checkpoints at 5, 10, 20, 50, 100. */
+			{
+				gwnum iter_g = gwalloc(gwdata);
+				if (iter_g != NULL) {
+					int iter;
+					int checkpoints[] = {5, 10, 20, 50, 100};
+					int num_checkpoints = 5;
+					int cp_idx = 0;
+
+					dbltogw(gwdata, 3.0, iter_g);
+					gw_clear_maxerr(gwdata);
+
+					for (iter = 1; iter <= 100 && cp_idx < num_checkpoints; iter++) {
+						gwsquare2(gwdata, iter_g, iter_g, 0);
+
+						if (iter == checkpoints[cp_idx]) {
+							giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+							conv_err = gwtogiant(gwdata, iter_g, result);
+							fprintf(stderr, "[ARM64 DIAG] iter=%d: conv=%d sign=%d",
+								iter, conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+							fprintf(stderr, " maxerr=%.6f\n", gw_get_maxerr(gwdata));
+							pushg(&gwdata->gdata, 1);
+							cp_idx++;
+						}
+					}
+					gwfree(gwdata, iter_g);
+				}
+			}
+
 			gwfree(gwdata, test_g);
 		}
 	}
