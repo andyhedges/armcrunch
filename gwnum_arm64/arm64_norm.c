@@ -63,6 +63,14 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
 	addin_offset = (size_t)ad->ADDIN_OFFSET;
 
+	/* Apply ADDIN_VALUE directly to the physical FFT buffer at ADDIN_OFFSET,
+	   before any per-word unweighting and carry propagation. */
+	if (ad->ADDIN_VALUE != 0.0 || ad->POSTADDIN_VALUE != 0.0) {
+		double *addin_ptr = (double *)((char *)buffer + addin_offset);
+		*addin_ptr += ad->ADDIN_VALUE;
+		*addin_ptr += ad->POSTADDIN_VALUE;
+	}
+
 	for (word = 0; word < words; ++word) {
 		int big_word = arm64_is_big_word(ad, word);
 		double base = arm64_word_base(ad, big_word);
@@ -78,12 +86,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 		/* Optional mulconst path. */
 		if (use_mulconst) value *= mulconst;
-
-		/* Optional addin at configured offset. */
-		if (word == addin_offset) {
-			value += ad->ADDIN_VALUE;
-			value += ad->POSTADDIN_VALUE;
-		}
 
 		/* Round to nearest integer and track roundoff error. */
 		rounded = nearbyint(value);
