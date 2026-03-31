@@ -64,11 +64,32 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	addin_offset = (size_t)ad->ADDIN_OFFSET;
 
 	/* Apply ADDIN_VALUE directly to the physical FFT buffer at ADDIN_OFFSET,
-	   before any per-word unweighting and carry propagation. */
+	   matching exactly what the x86 assembly normalization does. The x86 code
+	   adds ADDIN_VALUE to the raw weighted double at the byte offset BEFORE
+	   any per-word unweighting and carry propagation. */
 	if (ad->ADDIN_VALUE != 0.0 || ad->POSTADDIN_VALUE != 0.0) {
 		double *addin_ptr = (double *)((char *)buffer + addin_offset);
+#ifdef ARM64_DIAGNOSTICS
+		{
+			static int addin_debug_count = 0;
+			if (addin_debug_count < 3) {
+				double before = *addin_ptr;
+				double w0_before = arm64_load_scrambled_word(ad, buffer, 0u);
+				*addin_ptr += ad->ADDIN_VALUE;
+				*addin_ptr += ad->POSTADDIN_VALUE;
+				fprintf(stderr, "[ARM64 ADDIN] offset=%u val=%.6g post=%.6g ptr_before=%.6g ptr_after=%.6g w0_before=%.6g w0_after=%.6g\n",
+					(unsigned)addin_offset, ad->ADDIN_VALUE, ad->POSTADDIN_VALUE,
+					before, *addin_ptr, w0_before, arm64_load_scrambled_word(ad, buffer, 0u));
+				addin_debug_count++;
+			} else {
+				*addin_ptr += ad->ADDIN_VALUE;
+				*addin_ptr += ad->POSTADDIN_VALUE;
+			}
+		}
+#else
 		*addin_ptr += ad->ADDIN_VALUE;
 		*addin_ptr += ad->POSTADDIN_VALUE;
+#endif
 	}
 
 	for (word = 0; word < words; ++word) {
