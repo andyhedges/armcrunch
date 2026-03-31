@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #if defined(__aarch64__) || defined(ARM64)
@@ -928,6 +929,19 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	if (ad == NULL) return;
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
+
+	/* One-shot k>1 diagnostic to stderr */
+	if (ad->gwdata != NULL && ad->gwdata->k > 1.0) {
+		static int k_gt1_logged = 0;
+		if (!k_gt1_logged) {
+			k_gt1_logged = 1;
+			fprintf(stderr, "[ARM64 K>1] k=%.1f b=%lu n=%lu c=%ld FFTLEN=%lu ffttype=%d ADDIN_OFF=%u ADDIN_VAL=%.6g POSTADDIN=%.6g\n",
+				ad->gwdata->k, (unsigned long)ad->gwdata->b, (unsigned long)ad->gwdata->n,
+				(long)ad->gwdata->c, (unsigned long)ad->gwdata->FFTLEN,
+				(int)(unsigned char)ad->ffttype,
+				(unsigned)ad->ADDIN_OFFSET, ad->ADDIN_VALUE, ad->POSTADDIN_VALUE);
+		}
+	}
 
 	/* Disable gwmul3_carefully at runtime (belt-and-suspenders). */
 	if (ad->gwdata != NULL)
