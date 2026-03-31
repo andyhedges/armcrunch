@@ -156,49 +156,49 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 	*(double *)((char *)base + arm64_word_offset_bytes(ad, word)) = value;
 }
 
-/*
- * Pack gwnum's FFTLEN scrambled doubles into FFTLEN/2 complex numbers.
- *
- * In gwnum's SSE2 HG one-pass layout, FFTLEN doubles represent FFTLEN/2
- * complex numbers: word k is the real part and word k+FFTLEN/2 is the
- * imaginary part of complex element k.
- *
- * Output: dst_complex has FFTLEN/2 complex numbers = FFTLEN doubles
- *         stored as interleaved (re0, im0, re1, im1, ...)
- */
+/* Unscramble FFTLEN real words from gwnum layout into a contiguous complex array
+   (each word becomes a complex number with zero imaginary part). */
 static int arm64_pack_scrambled_to_complex(const struct gwasm_data *ad, const double *src, double *dst_complex) {
-	size_t words, half, k;
+	size_t words, j;
 	if (ad == NULL || src == NULL || dst_complex == NULL) return 0;
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return 0;
-	half = words / 2u;
 
-	for (k = 0; k < half; ++k) {
-		double re = arm64_load_scrambled_word(ad, src, k);
-		double im = arm64_load_scrambled_word(ad, src, k + half);
-		dst_complex[2u * k] = re;
-		dst_complex[2u * k + 1u] = im;
+	/* First unscramble into temporary contiguous order at the start of dst_complex */
+	for (j = 0; j < words; ++j)
+		dst_complex[j] = arm64_load_scrambled_word(ad, src, j);
+
+	/* Expand in-place from real to complex (backwards to avoid overwrite) */
+	for (j = words; j > 0u; --j) {
+		double v = dst_complex[j - 1u];
+		dst_complex[(j - 1u) * 2u] = v;
+		dst_complex[(j - 1u) * 2u + 1u] = 0.0;
 	}
 	return 1;
 }
 
-/*
- * Unpack FFTLEN/2 complex numbers back into gwnum's FFTLEN scrambled doubles.
- *
- * Splits each complex number: real part → word k, imaginary part → word k+FFTLEN/2.
- */
+/* Extract real parts from complex array and rescramble into gwnum layout. */
 static int arm64_unpack_complex_to_scrambled(const struct gwasm_data *ad, const double *src_complex, double *dst) {
-	size_t words, half, k;
+	size_t words, j;
+	double *linear;
+	int ok;
+
 	if (ad == NULL || src_complex == NULL || dst == NULL) return 0;
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return 0;
-	half = words / 2u;
 
-	for (k = 0; k < half; ++k) {
-		arm64_store_scrambled_word(ad, dst, k, src_complex[2u * k]);
-		arm64_store_scrambled_word(ad, dst, k + half, src_complex[2u * k + 1u]);
-	}
-	return 1;
+	linear = (double *)malloc(words * sizeof(double));
+	if (linear == NULL) return 0;
+
+	for (j = 0; j < words; ++j)
+		linear[j] = src_complex[2u * j];
+
+	ok = 1;
+	for (j = 0; j < words; ++j)
+		arm64_store_scrambled_word(ad, dst, j, linear[j]);
+
+	free(linear);
+	return ok;
 }
 
 static void arm64_pointwise_mul(double *dst, const double *a, const double *b, size_t complex_len) {
@@ -271,16 +271,16 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
 
-	/* Disable gwmul3_carefully at runtime as a belt-and-suspenders measure. */
+	/* Disable gwmul3_carefully at runtime as a belt-and-suspenders measure.
+	   The compile-time guard in the patched gwnum.c should prevent it, but
+	   this catches any case where the patch didn't apply. */
 	if (ad->gwdata != NULL)
 		ad->gwdata->careful_count = 0;
 
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return;
 
-	/* gwnum's HG one-pass SSE2 layout: FFTLEN doubles = FFTLEN/2 complex pairs.
-	   Word k is the real part, word k+FFTLEN/2 is the imaginary part. */
-	complex_len = words / 2u;
+	complex_len = words;
 	if (!arm64_is_power_of_two(complex_len)) return;
 
 	s1 = arm64_fftsrc_ptr(ad);
@@ -290,16 +290,16 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 
 	ffttype = (unsigned int)(unsigned char)ad->ffttype;
 
-	/* ffttype=1 (forward FFT only): no-op. All multiply/square operations
-	   do the full pipeline internally using temp buffers. */
+	/* ffttype=1 (forward FFT only): no-op. Our full N-point complex FFT
+	   needs 2N doubles but gwnum buffers hold only N. All multiply/square
+	   operations do the full pipeline internally using temp buffers. */
 	if (ffttype == 1u) return;
 
-	/* Allocate temp buffer: FFTLEN/2 complex numbers = FFTLEN doubles */
-	tmp1 = (double *)malloc(words * sizeof(double));
+	tmp1 = (double *)malloc(2u * words * sizeof(double));
 	if (tmp1 == NULL) return;
 
 	if (ffttype == 3u || ffttype == 4u) {
-		tmp2 = (double *)malloc(words * sizeof(double));
+		tmp2 = (double *)malloc(2u * words * sizeof(double));
 		if (tmp2 == NULL) {
 			free(tmp1);
 			return;
@@ -318,7 +318,9 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		arm64_normalize(asm_data);
 		break;
 
-	case 3:	/* forward s1 + mul by s2 + inverse + normalize */
+	case 3:	/* forward s1 + mul by s2 + inverse + normalize
+		   (s2 may be marked as "FFTed" by gwnum but we treat it as raw data
+		    since our ffttype=1 is a no-op) */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
@@ -332,7 +334,8 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		arm64_normalize(asm_data);
 		break;
 
-	case 4:	/* mul two operands + inverse + normalize */
+	case 4:	/* mul two operands + inverse + normalize
+		   (both may be "FFTed" but we FFT from scratch) */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
