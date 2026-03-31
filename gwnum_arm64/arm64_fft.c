@@ -59,6 +59,51 @@ static int arm64_is_power_of_two(size_t n) {
 enum { ARM64_TWIDDLE_CACHE_SLOTS = 32 };
 static double *arm64_twiddle_cache[ARM64_TWIDDLE_CACHE_SLOTS];
 
+#if defined(__GNUC__) || defined(__clang__)
+#define ARM64_THREAD_LOCAL __thread
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+#define ARM64_THREAD_LOCAL _Thread_local
+#else
+#define ARM64_THREAD_LOCAL
+#endif
+
+static ARM64_THREAD_LOCAL double *arm64_fft_tmp1_cache;
+static ARM64_THREAD_LOCAL size_t arm64_fft_tmp1_capacity;
+static ARM64_THREAD_LOCAL double *arm64_fft_tmp2_cache;
+static ARM64_THREAD_LOCAL size_t arm64_fft_tmp2_capacity;
+
+static int arm64_ensure_tmp_capacity(double **buffer, size_t *capacity, size_t words) {
+	double *new_buffer;
+
+	if (buffer == NULL || capacity == NULL || words == 0u) return 0;
+	if (*buffer != NULL && *capacity >= words) return 1;
+
+	new_buffer = (double *)realloc(*buffer, words * sizeof(double));
+	if (new_buffer == NULL) return 0;
+
+	*buffer = new_buffer;
+	*capacity = words;
+	return 1;
+}
+
+static int arm64_get_fft_tmp_buffers(size_t words, int need_tmp2, double **tmp1, double **tmp2) {
+	if (tmp1 == NULL || tmp2 == NULL || words == 0u) return 0;
+
+	if (!arm64_ensure_tmp_capacity(&arm64_fft_tmp1_cache, &arm64_fft_tmp1_capacity, words))
+		return 0;
+
+	if (need_tmp2) {
+		if (!arm64_ensure_tmp_capacity(&arm64_fft_tmp2_cache, &arm64_fft_tmp2_capacity, words))
+			return 0;
+		*tmp2 = arm64_fft_tmp2_cache;
+	} else {
+		*tmp2 = NULL;
+	}
+
+	*tmp1 = arm64_fft_tmp1_cache;
+	return 1;
+}
+
 static int arm64_log2_u32(uint32_t v) {
 	int n = 0;
 	while (v > 1u) { v >>= 1u; ++n; }
@@ -237,49 +282,37 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 	*(double *)((char *)base + arm64_word_offset_bytes(ad, word)) = value;
 }
 
-/* Unscramble FFTLEN real words from gwnum layout into a contiguous complex array
-   (each word becomes a complex number with zero imaginary part). */
+/* Pack FFTLEN real words from gwnum layout into FFTLEN/2 complex values:
+   word k is the real part, word k+FFTLEN/2 is the imaginary part. */
 static int arm64_pack_scrambled_to_complex(const struct gwasm_data *ad, const double *src, double *dst_complex) {
-	size_t words, j;
+	size_t words, half, k;
 	if (ad == NULL || src == NULL || dst_complex == NULL) return 0;
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return 0;
 
-	/* First unscramble into temporary contiguous order at the start of dst_complex */
-	for (j = 0; j < words; ++j)
-		dst_complex[j] = arm64_load_scrambled_word(ad, src, j);
-
-	/* Expand in-place from real to complex (backwards to avoid overwrite) */
-	for (j = words; j > 0u; --j) {
-		double v = dst_complex[j - 1u];
-		dst_complex[(j - 1u) * 2u] = v;
-		dst_complex[(j - 1u) * 2u + 1u] = 0.0;
+	half = words / 2u;
+	for (k = 0; k < half; ++k) {
+		dst_complex[2u * k] = arm64_load_scrambled_word(ad, src, k);
+		dst_complex[2u * k + 1u] = arm64_load_scrambled_word(ad, src, k + half);
 	}
 	return 1;
 }
 
-/* Extract real parts from complex array and rescramble into gwnum layout. */
+/* Unpack FFTLEN/2 complex values into FFTLEN real words in gwnum layout:
+   real part -> word k, imaginary part -> word k+FFTLEN/2. */
 static int arm64_unpack_complex_to_scrambled(const struct gwasm_data *ad, const double *src_complex, double *dst) {
-	size_t words, j;
-	double *linear;
-	int ok;
+	size_t words, half, k;
 
 	if (ad == NULL || src_complex == NULL || dst == NULL) return 0;
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return 0;
 
-	linear = (double *)malloc(words * sizeof(double));
-	if (linear == NULL) return 0;
-
-	for (j = 0; j < words; ++j)
-		linear[j] = src_complex[2u * j];
-
-	ok = 1;
-	for (j = 0; j < words; ++j)
-		arm64_store_scrambled_word(ad, dst, j, linear[j]);
-
-	free(linear);
-	return ok;
+	half = words / 2u;
+	for (k = 0; k < half; ++k) {
+		arm64_store_scrambled_word(ad, dst, k, src_complex[2u * k]);
+		arm64_store_scrambled_word(ad, dst, k + half, src_complex[2u * k + 1u]);
+	}
+	return 1;
 }
 
 static void arm64_pointwise_mul(double *dst, const double *a, const double *b, size_t complex_len) {
@@ -346,6 +379,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	unsigned int ffttype;
 	double *tmp1 = NULL;
 	double *tmp2 = NULL;
+	int need_tmp2;
 	int ok = 1;
 
 	if (ad == NULL) return;
@@ -361,7 +395,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return;
 
-	complex_len = words;
+	complex_len = words / 2u;
 	if (!arm64_is_power_of_two(complex_len)) return;
 
 	s1 = arm64_fftsrc_ptr(ad);
@@ -371,21 +405,12 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 
 	ffttype = (unsigned int)(unsigned char)ad->ffttype;
 
-	/* ffttype=1 (forward FFT only): no-op. Our full N-point complex FFT
-	   needs 2N doubles but gwnum buffers hold only N. All multiply/square
-	   operations do the full pipeline internally using temp buffers. */
+	/* ffttype=1 (forward FFT only): no-op. Full pipelines are handled
+	   internally by ffttype=2/3/4 using scratch buffers. */
 	if (ffttype == 1u) return;
 
-	tmp1 = (double *)malloc(2u * words * sizeof(double));
-	if (tmp1 == NULL) return;
-
-	if (ffttype == 3u || ffttype == 4u) {
-		tmp2 = (double *)malloc(2u * words * sizeof(double));
-		if (tmp2 == NULL) {
-			free(tmp1);
-			return;
-		}
-	}
+	need_tmp2 = (ffttype == 3u || ffttype == 4u) ? 1 : 0;
+	if (!arm64_get_fft_tmp_buffers(words, need_tmp2, &tmp1, &tmp2)) return;
 
 	switch (ffttype) {
 	case 2:	/* forward + square + inverse + normalize */
@@ -437,7 +462,4 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	default:
 		break;
 	}
-
-	free(tmp2);
-	free(tmp1);
 }
