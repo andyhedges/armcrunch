@@ -449,8 +449,9 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 							fprintf(stderr, "\n");
 							dbltogw(gwdata, 3.0, diag_g);
 							for (word = 0; word < 8; word++) {
-								fprintf(stderr, "[ARM64 DIAG] raw_fft[%d]=%.17g\n",
-									word, get_fft_value(gwdata, diag_g, (unsigned long)word));
+								long wv = 0;
+								get_fft_value(gwdata, diag_g, (unsigned long)word, &wv);
+								fprintf(stderr, "[ARM64 DIAG] raw_fft[%d]=%ld\n", word, wv);
 							}
 						}
 						pushg(&gwdata->gdata, 1);
