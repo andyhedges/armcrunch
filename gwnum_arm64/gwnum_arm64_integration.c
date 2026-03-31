@@ -222,6 +222,8 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 		if (rt_g != NULL) {
 			giant rt_result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
 			int rt_err;
+
+			/* Test 1: dbltogw(3) -> gwtogiant = 3 (basic conversion) */
 			dbltogw(gwdata, 3.0, rt_g);
 			rt_err = gwtogiant(gwdata, rt_g, rt_result);
 			if (rt_err >= 0 && rt_result->sign == 1 && rt_result->n[0] == 3) {
@@ -232,6 +234,40 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 				if (rt_result->sign >= 2) fprintf(stderr, " n[1]=%u", rt_result->n[1]);
 				fprintf(stderr, " (k=%.1f)\n", gwdata->k);
 			}
+
+			/* Test 2: dbltogw(3) -> gwsquare2 -> gwtogiant = 9 (ffttype=2 squaring) */
+			dbltogw(gwdata, 3.0, rt_g);
+			gwsquare2(gwdata, rt_g, rt_g, 0);
+			rt_err = gwtogiant(gwdata, rt_g, rt_result);
+			if (rt_err >= 0 && rt_result->sign == 1 && rt_result->n[0] == 9) {
+				fprintf(stderr, "[ARM64 K>1 RT] gwsquare2(3)=9 OK (k=%.1f)\n", gwdata->k);
+			} else {
+				fprintf(stderr, "[ARM64 K>1 RT] gwsquare2(3) FAILED: err=%d sign=%d", rt_err, rt_result->sign);
+				if (rt_result->sign >= 1) fprintf(stderr, " n[0]=%u", rt_result->n[0]);
+				if (rt_result->sign >= 2) fprintf(stderr, " n[1]=%u", rt_result->n[1]);
+				fprintf(stderr, " expected 9 (k=%.1f)\n", gwdata->k);
+			}
+
+			/* Test 3: gwmul3(3,5) = 15 (ffttype=3 multiply) */
+			{
+				gwnum rt_b = gwalloc(gwdata);
+				if (rt_b != NULL) {
+					dbltogw(gwdata, 3.0, rt_g);
+					dbltogw(gwdata, 5.0, rt_b);
+					gwmul3(gwdata, rt_g, rt_b, rt_g, 0);
+					rt_err = gwtogiant(gwdata, rt_g, rt_result);
+					if (rt_err >= 0 && rt_result->sign == 1 && rt_result->n[0] == 15) {
+						fprintf(stderr, "[ARM64 K>1 RT] gwmul3(3,5)=15 OK (k=%.1f)\n", gwdata->k);
+					} else {
+						fprintf(stderr, "[ARM64 K>1 RT] gwmul3(3,5) FAILED: err=%d sign=%d", rt_err, rt_result->sign);
+						if (rt_result->sign >= 1) fprintf(stderr, " n[0]=%u", rt_result->n[0]);
+						if (rt_result->sign >= 2) fprintf(stderr, " n[1]=%u", rt_result->n[1]);
+						fprintf(stderr, " expected 15 (k=%.1f)\n", gwdata->k);
+					}
+					gwfree(gwdata, rt_b);
+				}
+			}
+
 			pushg(&gwdata->gdata, 1);
 			gwfree(gwdata, rt_g);
 		}
