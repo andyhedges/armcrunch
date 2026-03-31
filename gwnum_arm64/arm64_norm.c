@@ -57,6 +57,7 @@ static inline double arm64_gw_inverse_weight(const struct gwasm_data *ad, size_t
    Returns FFTLEN (invalid) if no match is found. */
 static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, const arm64_word_cache *cache, uint32_t byte_offset) {
 	size_t words, w;
+	uint32_t candidate_offset;
 
 	if (ad == NULL) return 0;
 	words = arm64_data_words(ad);
@@ -66,6 +67,23 @@ static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, const arm6
 			if ((uint32_t)cache->byte_offsets[w] == byte_offset)
 				return w;
 		}
+
+		if (byte_offset >= 8) {
+			candidate_offset = byte_offset - 8;
+			for (w = 0; w < words; ++w) {
+				if ((uint32_t)cache->byte_offsets[w] == candidate_offset)
+					return w;
+			}
+		}
+
+		candidate_offset = byte_offset + 8;
+		if (candidate_offset > byte_offset) {
+			for (w = 0; w < words; ++w) {
+				if ((uint32_t)cache->byte_offsets[w] == candidate_offset)
+					return w;
+			}
+		}
+
 		return words;
 	}
 
@@ -74,6 +92,23 @@ static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, const arm6
 		if ((uint32_t)addr_offset(ad->gwdata, (unsigned long)w) == byte_offset)
 			return w;
 	}
+
+	if (byte_offset >= 8) {
+		candidate_offset = byte_offset - 8;
+		for (w = 0; w < words; ++w) {
+			if ((uint32_t)addr_offset(ad->gwdata, (unsigned long)w) == candidate_offset)
+				return w;
+		}
+	}
+
+	candidate_offset = byte_offset + 8;
+	if (candidate_offset > byte_offset) {
+		for (w = 0; w < words; ++w) {
+			if ((uint32_t)addr_offset(ad->gwdata, (unsigned long)w) == candidate_offset)
+				return w;
+		}
+	}
+
 	return words;
 }
 
