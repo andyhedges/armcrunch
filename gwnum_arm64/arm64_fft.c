@@ -930,16 +930,17 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
 
-	/* One-shot k>1 diagnostic to stderr */
+	/* k>1 diagnostic: print first 5 FFT calls to trace operation sequence */
 	if (ad->gwdata != NULL && ad->gwdata->k > 1.0) {
-		static int k_gt1_logged = 0;
-		if (!k_gt1_logged) {
-			k_gt1_logged = 1;
-			fprintf(stderr, "[ARM64 K>1] k=%.1f b=%lu n=%lu c=%ld FFTLEN=%lu ffttype=%d ADDIN_OFF=%u ADDIN_VAL=%.6g POSTADDIN=%.6g\n",
-				ad->gwdata->k, (unsigned long)ad->gwdata->b, (unsigned long)ad->gwdata->n,
-				(long)ad->gwdata->c, (unsigned long)ad->gwdata->FFTLEN,
+		static int k_gt1_count = 0;
+		if (k_gt1_count < 5) {
+			k_gt1_count++;
+			fprintf(stderr, "[ARM64 K>1 #%d] ffttype=%d FFTLEN=%lu ADDIN_OFF=%u ADDIN_VAL=%.6g dest=%p s1_dist=%ld s2_dist=%ld\n",
+				k_gt1_count,
 				(int)(unsigned char)ad->ffttype,
-				(unsigned)ad->ADDIN_OFFSET, ad->ADDIN_VALUE, ad->POSTADDIN_VALUE);
+				(unsigned long)ad->gwdata->FFTLEN,
+				(unsigned)ad->ADDIN_OFFSET, ad->ADDIN_VALUE,
+				(void*)dest, (long)ad->DIST_TO_FFTSRCARG, (long)ad->DIST_TO_MULSRCARG);
 		}
 	}
 
