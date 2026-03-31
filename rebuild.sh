@@ -23,6 +23,7 @@ if [ -d "$PRST_DIR/src" ]; then
     cp gwnum.a "$PRST_DIR/framework/gwnum/macarm64/"
 
     # Write Makefile
+    mkdir -p "$PRST_DIR/src/macarm64"
     cat << 'EOF' > "$PRST_DIR/src/macarm64/Makefile"
 CC      = clang
 CXX     = clang++
