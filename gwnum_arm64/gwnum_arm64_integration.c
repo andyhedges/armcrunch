@@ -108,7 +108,7 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 	gwdata->SCRATCH_SIZE = 0;
 	gwdata->GW_ALIGNMENT = 128;
 	gwdata->GW_ALIGNMENT_MOD = 0;
-	gwdata->mem_needed = fftlen * (unsigned long)(sizeof(double) * 12);
+	gwdata->mem_needed = fftlen * (unsigned long)(sizeof(double) * 20);
 
 	{
 		double bpw = arm64_bits_per_word(fftlen, negacyclic);
