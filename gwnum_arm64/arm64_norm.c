@@ -246,6 +246,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		const arm64_asm_constants *ac = arm64_constants(ad);
 		double minus_c = 1.0;
 		double wrap_carry;
+		double k_val = (ad->gwdata != NULL) ? ad->gwdata->k : 1.0;
 		int wrap_pass;
 		const int max_wrap_passes = 10;
 
@@ -255,7 +256,8 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			minus_c = (double)(-ad->gwdata->c);
 		}
 
-		wrap_carry = carry * minus_c;
+		if (k_val < 1.0) k_val = 1.0;
+		wrap_carry = carry * minus_c / k_val;
 
 		for (wrap_pass = 0; wrap_pass < max_wrap_passes && wrap_carry != 0.0; ++wrap_pass) {
 			double pass_carry = wrap_carry;
