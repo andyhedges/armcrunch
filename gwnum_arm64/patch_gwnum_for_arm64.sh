@@ -12,6 +12,8 @@
 #   3. Replace gwinfo1() call with arm64_gwinfo_hook() that returns immediately on ARM64
 #   4. Insert arm64_gwsetup_hook before x86 GWPROCPTRS block, with #else/#endif
 #   5. Guard pass1/pass2_aux_entry_point declarations
+#   6. Comment out careful_count > 0 check in gwmul3 (belt-and-suspenders)
+#   7. Redirect gwmul3_carefully to gwmul3 on ARM64 (handles direct calls from CarefulGWArithmetic)
 
 set -euo pipefail
 
@@ -152,6 +154,30 @@ while i < n:
                 break
             i += 1
         out.append('*/\n')
+        continue
+
+    # 7. Redirect gwmul3_carefully to regular gwmul3 on ARM64.
+    #    Detect by function signature: "void gwmul3_carefully (" at start of line.
+    #    CarefulGWArithmetic::mul calls this directly, bypassing careful_count.
+    #    gwmul3_carefully uses gwaddsub4o + gwmuladd4 + FFTed_FOR_FMA which our
+    #    ARM64 backend does not support. Regular gwmul3 works correctly.
+    if line.startswith('void gwmul3_carefully (') or line.startswith('void gwmul3_carefully('):
+        out.append(line)
+        i += 1
+        # Collect parameter/comment lines until we find the opening brace
+        while i < n and '{' not in lines[i]:
+            out.append(lines[i])
+            i += 1
+        if i < n:
+            out.append(lines[i])  # the line containing the opening brace
+            i += 1
+        # Insert ARM64 redirect right after the opening brace
+        out.append('#if defined(ARM64) || defined(__aarch64__)\n')
+        out.append('\t/* ARM64: redirect to regular gwmul3 — our backend does not support\n')
+        out.append('\t   the gwaddsub4o + gwmuladd4 + FFTed_FOR_FMA path. */\n')
+        out.append('\tgwmul3(gwdata, s1, s2, d, options);\n')
+        out.append('\treturn;\n')
+        out.append('#endif\n')
         continue
 
     # Close the ARM64 #else block before "Default normalization"
