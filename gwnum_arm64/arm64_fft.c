@@ -56,10 +56,43 @@ static int arm64_is_power_of_two(size_t n) {
 	return (n != 0u) && ((n & (n - 1u)) == 0u);
 }
 
+enum { ARM64_TWIDDLE_CACHE_SLOTS = 32 };
+static double *arm64_twiddle_cache[ARM64_TWIDDLE_CACHE_SLOTS];
+
 static int arm64_log2_u32(uint32_t v) {
 	int n = 0;
 	while (v > 1u) { v >>= 1u; ++n; }
 	return n;
+}
+
+static const double *arm64_get_twiddle_table(size_t n) {
+	size_t j;
+	size_t half;
+	int log2_n;
+	double *table;
+	double angle_base;
+
+	if (n < 2u || !arm64_is_power_of_two(n) || n > (size_t)UINT32_MAX) return NULL;
+
+	log2_n = arm64_log2_u32((uint32_t)n);
+	if (log2_n < 0 || log2_n >= ARM64_TWIDDLE_CACHE_SLOTS) return NULL;
+
+	table = arm64_twiddle_cache[log2_n];
+	if (table != NULL) return table;
+
+	table = (double *)malloc(n * sizeof(double));
+	if (table == NULL) return NULL;
+
+	half = n / 2u;
+	angle_base = -2.0 * M_PI / (double)n;
+	for (j = 0; j < half; ++j) {
+		double angle = angle_base * (double)j;
+		table[2u * j] = cos(angle);
+		table[2u * j + 1u] = sin(angle);
+	}
+
+	arm64_twiddle_cache[log2_n] = table;
+	return table;
 }
 
 static uint32_t arm64_reverse_bits(uint32_t x, unsigned bits) {
@@ -105,39 +138,87 @@ static void arm64_scale_inverse(double *data, size_t complex_len) {
 #endif
 }
 
+static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twiddles, int inverse) {
+	size_t half = m / 2u;
+	size_t tw_step = n / m;
+	double imag_sign = inverse ? -1.0 : 1.0;
+	size_t k;
+
+	for (k = 0; k < n; k += m) {
+		size_t j = 0u;
+		size_t tw_idx = 0u;
+#if defined(__aarch64__) || defined(ARM64)
+		for (; j + 1u < half; j += 2u, tw_idx += 2u * tw_step) {
+			size_t t0 = tw_idx;
+			size_t t1 = tw_idx + tw_step;
+			double w_re_pair[2];
+			double w_im_pair[2];
+			float64x2_t w_re;
+			float64x2_t w_im;
+			float64x2x2_t va;
+			float64x2x2_t vb;
+			float64x2_t bw_re;
+			float64x2_t bw_im;
+			float64x2x2_t out0;
+			float64x2x2_t out1;
+
+			w_re_pair[0] = twiddles[2u * t0];
+			w_re_pair[1] = twiddles[2u * t1];
+			w_im_pair[0] = imag_sign * twiddles[2u * t0 + 1u];
+			w_im_pair[1] = imag_sign * twiddles[2u * t1 + 1u];
+
+			w_re = vld1q_f64(w_re_pair);
+			w_im = vld1q_f64(w_im_pair);
+
+			va = vld2q_f64(&data[(k + j) * 2u]);
+			vb = vld2q_f64(&data[(k + j + half) * 2u]);
+
+			bw_re = vmulq_f64(vb.val[0], w_re);
+			bw_im = vmulq_f64(vb.val[0], w_im);
+			bw_re = vfmsq_f64(bw_re, vb.val[1], w_im);
+			bw_im = vfmaq_f64(bw_im, vb.val[1], w_re);
+
+			out0.val[0] = vaddq_f64(va.val[0], bw_re);
+			out0.val[1] = vaddq_f64(va.val[1], bw_im);
+			out1.val[0] = vsubq_f64(va.val[0], bw_re);
+			out1.val[1] = vsubq_f64(va.val[1], bw_im);
+
+			vst2q_f64(&data[(k + j) * 2u], out0);
+			vst2q_f64(&data[(k + j + half) * 2u], out1);
+		}
+#endif
+		for (; j < half; ++j, tw_idx += tw_step) {
+			size_t i0 = k + j;
+			size_t i1 = i0 + half;
+			arm64_complex a = arm64_c_load(data, i0);
+			arm64_complex b = arm64_c_load(data, i1);
+			arm64_complex w;
+			arm64_complex bw;
+
+			w.r = twiddles[2u * tw_idx];
+			w.i = imag_sign * twiddles[2u * tw_idx + 1u];
+			bw = arm64_c_mul(b, w);
+
+			arm64_c_store(data, i0, arm64_c_add(a, bw));
+			arm64_c_store(data, i1, arm64_c_sub(a, bw));
+		}
+	}
+}
+
 /* Radix-2 Cooley-Tukey DIT FFT (forward) or inverse. */
 static void arm64_fft(double *data, size_t n, int inverse) {
 	size_t m;
+	const double *twiddles;
 
 	if (data == NULL || n < 2u || !arm64_is_power_of_two(n)) return;
 
+	twiddles = arm64_get_twiddle_table(n);
+	if (twiddles == NULL) return;
+
 	arm64_bit_reverse_permute(data, n);
 
-	for (m = 2u; m <= n; m *= 2u) {
-		size_t half = m / 2u;
-		double angle_base = (inverse ? 2.0 : -2.0) * M_PI / (double)m;
-		size_t k;
-
-		for (k = 0; k < n; k += m) {
-			size_t j;
-			for (j = 0; j < half; ++j) {
-				double angle = angle_base * (double)j;
-				arm64_complex w;
-				size_t i0 = k + j;
-				size_t i1 = i0 + half;
-				arm64_complex a = arm64_c_load(data, i0);
-				arm64_complex b = arm64_c_load(data, i1);
-				arm64_complex bw;
-
-				w.r = cos(angle);
-				w.i = sin(angle);
-				bw = arm64_c_mul(b, w);
-
-				arm64_c_store(data, i0, arm64_c_add(a, bw));
-				arm64_c_store(data, i1, arm64_c_sub(a, bw));
-			}
-		}
-	}
+	for (m = 2u; m <= n; m *= 2u)
+		arm64_fft_stage(data, n, m, twiddles, inverse);
 
 	if (inverse) arm64_scale_inverse(data, n);
 }
