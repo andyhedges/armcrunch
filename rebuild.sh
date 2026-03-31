@@ -132,13 +132,16 @@ else:
     fi
 
     # Step 3: Benchmark comparison
-    # Known Mersenne primes of increasing size for benchmarking
     BENCHMARKS=(
         "2^1279-1"
         "2^2203-1"
         "2^4253-1"
         "2^9689-1"
         "2^19937-1"
+        "3*2^4000-1"
+        "5*2^10000-1"
+        "7*2^1000-1"
+        "11*2^5000-1"
     )
 
     echo ""
