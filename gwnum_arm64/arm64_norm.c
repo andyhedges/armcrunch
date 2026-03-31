@@ -1,4 +1,6 @@
 #include "arm64_asm_data.h"
+#include "gwnum.h"
+#include "gwdbldbl.h"
 #include "gwtables.h"
 
 #include <math.h>
@@ -19,6 +21,26 @@ static inline double arm64_load_scrambled_word(const struct gwasm_data *ad, cons
 static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, double *buffer, size_t word, double value) {
 	char *ptr = (char *)buffer + arm64_word_offset_bytes(ad, word);
 	*(double *)ptr = value;
+}
+
+/* Use gwnum's own double-double precision weight functions for exact compatibility
+   with set_fft_value/get_fft_value. Our first-principles pow() computation has
+   insufficient precision, causing errors that compound over iterations. */
+
+static inline double arm64_gw_forward_weight(const struct gwasm_data *ad, size_t word) {
+	if (ad != NULL && ad->gwdata != NULL && ad->gwdata->dd_data != NULL) {
+		if (ad->RATIONAL_FFT) return 1.0;
+		return gwfft_weight_sloppy(ad->gwdata->dd_data, (unsigned long)word);
+	}
+	return arm64_forward_weight_at(ad, word);
+}
+
+static inline double arm64_gw_inverse_weight(const struct gwasm_data *ad, size_t word) {
+	if (ad != NULL && ad->gwdata != NULL && ad->gwdata->dd_data != NULL) {
+		if (ad->RATIONAL_FFT) return 1.0;
+		return gwfft_weight_inverse_sloppy(ad->gwdata->dd_data, (unsigned long)word);
+	}
+	return arm64_inverse_weight_at(ad, word);
 }
 
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
@@ -51,8 +73,8 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		double digit;
 		double stored;
 
-		/* Undo IBDWT weight. */
-		value *= arm64_inverse_weight_at(ad, word);
+		/* Undo IBDWT weight using gwnum's own double-double precision function. */
+		value *= arm64_gw_inverse_weight(ad, word);
 
 		/* Optional mulconst path. */
 		if (use_mulconst) value *= mulconst;
@@ -81,8 +103,9 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		/* Balanced digit after carry extraction. */
 		digit = rounded - carry_out * base;
 
-		/* Re-apply forward weight before storing back to FFT layout. */
-		stored = digit * arm64_forward_weight_at(ad, word);
+		/* Re-apply forward weight using gwnum's own function for exact match
+		   with what set_fft_value/get_fft_value expect. */
+		stored = digit * arm64_gw_forward_weight(ad, word);
 		arm64_store_scrambled_word(ad, buffer, word, stored);
 
 		carry = carry_out;
@@ -104,9 +127,9 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		wrap_carry = carry * minus_c;
 
 		w0 = arm64_load_scrambled_word(ad, buffer, 0u);
-		w0 *= arm64_inverse_weight_at(ad, 0u);
+		w0 *= arm64_gw_inverse_weight(ad, 0u);
 		w0 += wrap_carry;
-		w0 *= arm64_forward_weight_at(ad, 0u);
+		w0 *= arm64_gw_forward_weight(ad, 0u);
 		arm64_store_scrambled_word(ad, buffer, 0u, w0);
 	}
 
