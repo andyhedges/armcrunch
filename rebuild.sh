@@ -18,13 +18,34 @@ echo "=== gwnum.a built successfully ==="
 if [ -d "$PRST_DIR/src" ]; then
     echo "=== PRST found at $PRST_DIR, building... ==="
 
-    cd "$PRST_DIR"
-    git submodule update --init --recursive 2>/dev/null || true
-    cd "$ARMCRUNCH_DIR/gwnum_arm64"
+    # Ensure submodules are initialized (framework/arithmetic)
+    if [ ! -f "$PRST_DIR/framework/md5.c" ]; then
+        echo "  Framework submodule not found, initializing..."
+        cd "$PRST_DIR"
+        git submodule update --init --recursive 2>/dev/null || true
+        # If submodule still not there, clone directly via HTTPS
+        if [ ! -f "$PRST_DIR/framework/md5.c" ]; then
+            echo "  Submodule init failed, cloning framework directly..."
+            rm -rf "$PRST_DIR/framework"
+            git clone --depth 1 https://github.com/patnashev/arithmetic.git "$PRST_DIR/framework" 2>/dev/null || true
+        fi
+        cd "$ARMCRUNCH_DIR/gwnum_arm64"
+    fi
+
+    # Verify framework exists
+    if [ ! -f "$PRST_DIR/framework/md5.c" ]; then
+        echo "=== ERROR: PRST framework sources not found, skipping PRST build ==="
+        echo "=== gwnum.a is ready at $ARMCRUNCH_DIR/gwnum_arm64/gwnum.a ==="
+        exit 0
+    fi
 
     # Install gwnum.a
     mkdir -p "$PRST_DIR/framework/gwnum/macarm64"
     cp gwnum.a "$PRST_DIR/framework/gwnum/macarm64/"
+
+    # Copy gwnum headers needed by PRST
+    cp "$ARMCRUNCH_DIR/reference/prime95/gwnum/"*.h "$PRST_DIR/framework/gwnum/" 2>/dev/null || true
+    cp "$ARMCRUNCH_DIR/gwnum_arm64/arm64_asm_data.h" "$PRST_DIR/framework/gwnum/" 2>/dev/null || true
 
     # Write Makefile
     mkdir -p "$PRST_DIR/src/macarm64"
@@ -74,7 +95,7 @@ clean:
 EOF
 
     cd "$PRST_DIR/src/macarm64"
-    make clean
+    make clean 2>/dev/null || true
     rm -f logging.h
 
     # Patch framework's logging.h for missing param handling
