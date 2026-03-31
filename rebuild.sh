@@ -48,6 +48,7 @@ EOF
 
 cd gwnum_arm64
 make -f makemacarm64 clean
+rm -f build/macarm64/patched/.patched
 make -f makemacarm64
 
 cp gwnum.a ~/code/prst/framework/gwnum/macarm64/
@@ -94,4 +95,4 @@ make
 # Numbers smaller than ~350 bits fall through to the general-purpose
 # modular reduction path which our ARM64 backend does not yet support.
 # 2^1279-1 is a known Mersenne prime (1279 bits) that uses the IBDWT path.
-./prst "2^1279-1" -check never
+./prst "2^1279-1"
