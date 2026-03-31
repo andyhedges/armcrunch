@@ -30,7 +30,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	int use_mulconst;
 	double mulconst;
 	size_t addin_offset;
-	double *carries;
 
 	if (ad == NULL || buffer == NULL) return;
 
@@ -41,7 +40,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
 	addin_offset = (size_t)ad->ADDIN_OFFSET;
-	carries = (double *)ad->carries;
 
 	for (word = 0; word < words; ++word) {
 		int big_word = arm64_is_big_word(ad, word);
@@ -88,7 +86,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		arm64_store_scrambled_word(ad, buffer, word, stored);
 
 		carry = carry_out;
-		if (carries != NULL) carries[word] = carry;
 	}
 
 	/* Wraparound carry: multiply by -c and add into word 0 (unweighted domain). */
@@ -111,8 +108,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		w0 += wrap_carry;
 		w0 *= arm64_forward_weight_at(ad, 0u);
 		arm64_store_scrambled_word(ad, buffer, 0u, w0);
-
-		if (carries != NULL) carries[0] += wrap_carry;
 	}
 
 	if (errchk && maxerr > ad->MAXERR) {
