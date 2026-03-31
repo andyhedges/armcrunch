@@ -139,9 +139,10 @@ while i < n:
         i += 1
         continue
 
-    # 6. Skip gwmul3_carefully on ARM64 by guarding the careful_count check
+    # 6. Skip gwmul3_carefully on ARM64 by commenting out the careful_count check
     if 'if (gwdata->careful_count > 0)' in line and 'careful_count--' not in line:
-        out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
+        out.append('/* ARM64: gwmul3_carefully disabled - uses unsupported gwaddsub4o + gwmuladd4 with FMA */\n')
+        out.append('/*\n')
         out.append(line)
         i += 1
         while i < n:
@@ -150,7 +151,7 @@ while i < n:
                 i += 1
                 break
             i += 1
-        out.append('#endif\n')
+        out.append('*/\n')
         continue
 
     # Close the ARM64 #else block before "Default normalization"
