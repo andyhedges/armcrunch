@@ -1,6 +1,29 @@
-cd ~/code/armcrunch
+#!/bin/bash
+set -e
 
-cat << 'EOF' > ~/code/prst/src/macarm64/Makefile
+# Configurable paths
+ARMCRUNCH_DIR="${ARMCRUNCH_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+PRST_DIR="${PRST_DIR:-$HOME/code/prst}"
+
+cd "$ARMCRUNCH_DIR"
+
+# Step 1: Build gwnum.a for ARM64
+cd gwnum_arm64
+make -f makemacarm64 clean
+rm -f build/macarm64/patched/.patched
+make -f makemacarm64
+echo "=== gwnum.a built successfully ==="
+
+# Step 2: If PRST is available, build and test it
+if [ -d "$PRST_DIR/src" ]; then
+    echo "=== PRST found at $PRST_DIR, building... ==="
+
+    # Install gwnum.a
+    mkdir -p "$PRST_DIR/framework/gwnum/macarm64"
+    cp gwnum.a "$PRST_DIR/framework/gwnum/macarm64/"
+
+    # Write Makefile
+    cat << 'EOF' > "$PRST_DIR/src/macarm64/Makefile"
 CC      = clang
 CXX     = clang++
 AR      = ar
@@ -24,7 +47,6 @@ COMMON_CFLAGS   = -arch arm64 -O2 \
 CFLAGS   = -std=c99
 CXXFLAGS = -std=gnu++17
 
-# Suppress noisy warnings from upstream code
 CXXFLAGS += -Wno-sign-compare -Wno-unused-parameter -Wno-unused-private-field
 
 LDFLAGS  = -arch arm64
@@ -46,53 +68,39 @@ clean:
 .PHONY: all clean
 EOF
 
-cd gwnum_arm64
-make -f makemacarm64 clean
-rm -f build/macarm64/patched/.patched
-make -f makemacarm64
+    cd "$PRST_DIR/src/macarm64"
+    make clean
+    rm -f logging.h
 
-cp gwnum.a ~/code/prst/framework/gwnum/macarm64/
-
-cd ~/code/prst/src/macarm64
-make clean
-
-# Remove stale local logging.h from previous build attempts
-rm -f logging.h
-
-# Patch framework's logging.h in-place to handle missing params gracefully.
-# PRST's Progress::param_double/param_int call std::stod/stoi on potentially
-# empty strings when a .param file doesn't exist on first run.
-# This patch is intentional and persistent. Restore with: git checkout -- ../../framework/logging.h
-python3 -c "
-with open('../../framework/logging.h') as f:
+    # Patch framework's logging.h for missing param handling
+    LOGGING_H="$PRST_DIR/framework/logging.h"
+    if [ -f "$LOGGING_H" ]; then
+        python3 -c "
+with open('$LOGGING_H') as f:
     content = f.read()
-content = content.replace(
-    'return std::stod(_params[name], nullptr);',
-    'auto it = _params.find(name); return (it != _params.end() && !it->second.empty()) ? std::stod(it->second) : 0.0;'
-)
-content = content.replace(
-    'return std::stoi(_params[name], nullptr, 10);',
-    'auto it = _params.find(name); return (it != _params.end() && !it->second.empty()) ? std::stoi(it->second) : 0;'
-)
-with open('../../framework/logging.h', 'w') as f:
-    f.write(content)
+if 'std::stod(_params[name], nullptr)' in content:
+    content = content.replace(
+        'return std::stod(_params[name], nullptr);',
+        'auto it = _params.find(name); return (it != _params.end() && !it->second.empty()) ? std::stod(it->second) : 0.0;'
+    )
+    content = content.replace(
+        'return std::stoi(_params[name], nullptr, 10);',
+        'auto it = _params.find(name); return (it != _params.end() && !it->second.empty()) ? std::stoi(it->second) : 0;'
+    )
+    with open('$LOGGING_H', 'w') as f:
+        f.write(content)
+    print('  Patched logging.h')
+else:
+    print('  logging.h already patched')
 "
+    fi
 
-echo "=== Verifying patched logging.h ==="
-grep 'param_double\|param_int' "../../framework/logging.h"
-echo "=== End verify ==="
+    rm -f logging.h
+    make
 
-# Ensure no local logging.h exists before build
-rm -f logging.h
-if [ -f logging.h ]; then
-    echo "ERROR: logging.h still exists after rm -f!"
-    exit 1
+    echo "=== PRST built successfully, running test ==="
+    ./prst "2^1279-1"
+else
+    echo "=== PRST not found at $PRST_DIR, skipping PRST build ==="
+    echo "=== gwnum.a is ready at $ARMCRUNCH_DIR/gwnum_arm64/gwnum.a ==="
 fi
-
-make
-
-# Note: gwnum requires log2(b)*n >= 350 for the IBDWT fast path.
-# Numbers smaller than ~350 bits fall through to the general-purpose
-# modular reduction path which our ARM64 backend does not yet support.
-# 2^1279-1 is a known Mersenne prime (1279 bits) that uses the IBDWT path.
-./prst "2^1279-1"
