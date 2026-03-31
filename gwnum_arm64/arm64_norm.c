@@ -53,6 +53,30 @@ static inline double arm64_gw_inverse_weight(const struct gwasm_data *ad, size_t
 	return arm64_inverse_weight_at(ad, word);
 }
 
+/* Convert ADDIN_OFFSET (byte offset into FFT buffer) to a logical word index.
+   Returns FFTLEN (invalid) if no match is found. */
+static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, const arm64_word_cache *cache, uint32_t byte_offset) {
+	size_t words, w;
+
+	if (ad == NULL) return 0;
+	words = arm64_data_words(ad);
+
+	if (cache != NULL && cache->fftlen == words && cache->byte_offsets != NULL) {
+		for (w = 0; w < words; ++w) {
+			if ((uint32_t)cache->byte_offsets[w] == byte_offset)
+				return w;
+		}
+		return words;
+	}
+
+	if (ad->gwdata == NULL) return words;
+	for (w = 0; w < words; ++w) {
+		if ((uint32_t)addr_offset(ad->gwdata, (unsigned long)w) == byte_offset)
+			return w;
+	}
+	return words;
+}
+
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
 	struct gwasm_data *ad = asm_data;
 	const arm64_word_cache *cache = NULL;
@@ -68,6 +92,9 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	double maxerr;
 	int use_mulconst;
 	double mulconst;
+	size_t addin_word;
+	double addin_integer;
+	double postaddin_integer;
 
 	if (ad == NULL || buffer == NULL) return;
 
@@ -95,14 +122,28 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
 
-	/* ADDIN values are pre-scaled by gwnum for direct insertion into the raw FFT
-	   buffer at ADDIN_OFFSET. Apply them before normalization. */
-	if (ad->ADDIN_VALUE != 0.0 || ad->POSTADDIN_VALUE != 0.0) {
-		char *bp = (char *)buffer;
-		double *addin_target = (double *)(bp + ad->ADDIN_OFFSET);
+	/* Convert ADDIN_OFFSET from byte offset to logical word index. */
+	addin_word = arm64_addin_offset_to_word(ad, use_cached_tables ? cache : NULL, ad->ADDIN_OFFSET);
 
-		if (ad->ADDIN_VALUE != 0.0) *addin_target += ad->ADDIN_VALUE;
-		if (ad->POSTADDIN_VALUE != 0.0) *addin_target += ad->POSTADDIN_VALUE;
+	/* raw_gwsetaddin pre-multiplies ADDIN_VALUE by weight(word) * FFTLEN/2 / k
+	   for the x86 assembly normalization which operates on raw FFT output
+	   (still weighted and scaled by FFTLEN/2). Our normalization works in the
+	   unweighted integer domain after IFFT scaling and weight removal, so we
+	   undo this pre-scaling to recover the actual integer addin value.
+	   Formula: integer_addin = ADDIN_VALUE / (weight(addin_word) * FFTLEN/2 / k) */
+	addin_integer = 0.0;
+	postaddin_integer = ad->POSTADDIN_VALUE;  /* POSTADDIN is not pre-scaled by weight*FFTLEN/2/k */
+	if (ad->ADDIN_VALUE != 0.0 && ad->gwdata != NULL && addin_word < words) {
+		double k = ad->gwdata->k;
+		double fftlen_half = (double)ad->gwdata->FFTLEN * 0.5;
+		double weight_at_addin = use_cached_tables ? fwd_weights[addin_word] : arm64_gw_forward_weight(ad, addin_word);
+		double prescale;
+		if (k == 0.0) k = 1.0;  /* guard against divide-by-zero */
+		prescale = weight_at_addin * fftlen_half / k;
+		if (prescale != 0.0)
+			addin_integer = ad->ADDIN_VALUE / prescale;
+		else
+			addin_integer = ad->ADDIN_VALUE;
 	}
 
 	if (use_cached_tables) {
@@ -123,6 +164,11 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			value *= inv_weights[word];
 
 			if (use_mulconst) value *= mulconst;
+
+			if (word == addin_word) {
+				value += addin_integer;
+				value += postaddin_integer;
+			}
 
 			rounded = nearbyint(value);
 			if (errchk) {
@@ -159,6 +205,12 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 			/* Optional mulconst path. */
 			if (use_mulconst) value *= mulconst;
+
+			/* Optional addin at the configured word (in unweighted integer domain). */
+			if (word == addin_word) {
+				value += addin_integer;
+				value += postaddin_integer;
+			}
 
 			/* Round to nearest integer and track roundoff error. */
 			rounded = nearbyint(value);
