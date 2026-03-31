@@ -5,6 +5,9 @@
 
 #include <math.h>
 #include <stddef.h>
+#ifdef ARM64_DIAGNOSTICS
+#include <stdio.h>
+#endif
 
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
 	if (ad != NULL && ad->gwdata != NULL) {
