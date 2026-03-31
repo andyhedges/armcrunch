@@ -404,6 +404,11 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 				}
 			}
 
+			/* Disable careful_count to prevent gwmul3_carefully from being called.
+			   gwmul3_carefully uses gwaddsub4o + gwmuladd4 with FMA state that
+			   our ARM64 backend does not yet fully support. */
+			gwdata->careful_count = 0;
+
 			gwfree(gwdata, test_g);
 		} else {
 			fprintf(stderr, "[ARM64 SETUP] gwalloc returned NULL!\n");

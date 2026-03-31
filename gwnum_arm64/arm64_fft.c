@@ -371,6 +371,10 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
 
+	if (ad->gwdata != NULL) {
+		ad->gwdata->careful_count = 0;
+	}
+
 	words = arm64_data_words(ad);
 	if (words == 0u || (words & 1u) != 0u) return;
 
