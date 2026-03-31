@@ -16,9 +16,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
-#ifdef ARM64_DIAGNOSTICS
 #include <stdio.h>
-#endif
 #include "cpuid.h"
 #include "gwnum.h"
 #include "gwtables.h"
@@ -216,6 +214,28 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	ac->NEON_NUM_B_PER_SMALL_WORD = gwdata->NUM_B_PER_SMALL_WORD;
 
 	gwdata->careful_count = 0;
+
+	/* Quick k>1 round-trip test: dbltogw(3) -> gwtogiant should return 3 for any k.
+	   This fires once per gwsetup and helps diagnose Riesel number failures. */
+	if (gwdata->k > 1.0) {
+		gwnum rt_g = gwalloc(gwdata);
+		if (rt_g != NULL) {
+			giant rt_result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+			int rt_err;
+			dbltogw(gwdata, 3.0, rt_g);
+			rt_err = gwtogiant(gwdata, rt_g, rt_result);
+			if (rt_err >= 0 && rt_result->sign == 1 && rt_result->n[0] == 3) {
+				fprintf(stderr, "[ARM64 K>1 RT] dbltogw(3)->gwtogiant = 3 OK (k=%.1f)\n", gwdata->k);
+			} else {
+				fprintf(stderr, "[ARM64 K>1 RT] dbltogw(3)->gwtogiant FAILED: err=%d sign=%d", rt_err, rt_result->sign);
+				if (rt_result->sign >= 1) fprintf(stderr, " n[0]=%u", rt_result->n[0]);
+				if (rt_result->sign >= 2) fprintf(stderr, " n[1]=%u", rt_result->n[1]);
+				fprintf(stderr, " (k=%.1f)\n", gwdata->k);
+			}
+			pushg(&gwdata->gdata, 1);
+			gwfree(gwdata, rt_g);
+		}
+	}
 
 #ifdef ARM64_DIAGNOSTICS
 	{
