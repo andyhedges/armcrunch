@@ -25,7 +25,7 @@ CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 -DNDEBUG \
            -I$(GWNUM_PARENT) -I$(GWNUM_PARENT)/qd
 
 # ARM64 backend hot-path modules get aggressive optimization
-ARM64_CFLAGS = $(CFLAGS) -O3 -mcpu=apple-m1 -DARM64_DIAGNOSTICS
+ARM64_CFLAGS = $(CFLAGS) -O3 -mcpu=apple-m1
 
 LIB = gwnum.a
 
