@@ -63,7 +63,6 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 
 	safety_margin = gwdata->safety_margin + gwdata->polymult_safety_margin;
 
-	/* Find smallest FFT length that can handle this number */
 	fftlen = 0;
 	for (i = 0; arm64_fft_sizes[i] != 0; i++) {
 		double bpw = arm64_bits_per_word(arm64_fft_sizes[i], negacyclic) - safety_margin;
@@ -73,7 +72,6 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 		}
 	}
 
-	/* Honor larger_fftlen_count */
 	{
 		int skip;
 		for (skip = 0; skip < gwdata->larger_fftlen_count && arm64_fft_sizes[i] != 0; skip++) {
@@ -82,7 +80,6 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 		}
 	}
 
-	/* Honor minimum_fftlen */
 	if (gwdata->minimum_fftlen > 0) {
 		int j;
 		for (j = 0; arm64_fft_sizes[j] != 0; j++) {
@@ -96,9 +93,6 @@ int arm64_gwinfo_hook(gwhandle *gwdata, int negacyclic)
 
 	if (fftlen == 0) return GWERROR_TOO_LARGE;
 
-	/* Set CPU_SSE2 so internal_gwsetup() follows the SSE2 code path for
-	   table building (weight tables, sin/cos tables). arm64_gwsetup_hook
-	   then overwrites the SSE2 GWPROCPTRS with ARM64 implementations. */
 	gwdata->cpu_flags = CPU_SSE2;
 
 	gwdata->FFTLEN = fftlen;
@@ -153,8 +147,6 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	arm64_install_gwprocptrs(gwdata->GWPROCPTRS);
 
 	ad = (struct gwasm_data *)gwdata->asm_data;
-
-	/* Set the gwdata back-pointer so addr_offset() works. */
 	ad->gwdata = gwdata;
 
 	ad->FFTLEN = (uint32_t)gwdata->FFTLEN;
@@ -169,10 +161,6 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	ac->NEON_BIGVAL = ad->u.xmm.XMM_BIGVAL[0];
 	if (ac->NEON_BIGVAL == 0.0) ac->NEON_BIGVAL = ARM64_DEFAULT_BIGVAL;
 
-	/* Always compute word bases from first principles. The SSE2
-	   XMM_LIMIT_INVERSE/XMM_LIMIT_BIGMAX arrays use a complex interleaved
-	   layout specific to the HG one-pass FFT that does NOT map to simple
-	   [small, big] indexing. */
 	if (gwdata->b == 2) {
 		small_word = ldexp(1.0, (int)gwdata->NUM_B_PER_SMALL_WORD);
 		big_word   = small_word * 2.0;
@@ -200,14 +188,12 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	}
 
 	ac->NEON_MINUS_C = ad->u.xmm.XMM_MINUS_C[0];
-	if (ac->NEON_MINUS_C == 0.0 && gwdata->c != 0) {
+	if (ac->NEON_MINUS_C == 0.0 && gwdata->c != 0)
 		ac->NEON_MINUS_C = (double)(-gwdata->c);
-	}
 
 	ac->NEON_MULCONST = ad->u.xmm.XMM_MULCONST[0];
-	if (ac->NEON_MULCONST == 0.0) {
+	if (ac->NEON_MULCONST == 0.0)
 		ac->NEON_MULCONST = (double)gwdata->mulbyconst;
-	}
 
 	ac->NEON_NORM012_FF = ad->u.xmm.XMM_NORM012_FF[0];
 	if (ac->NEON_NORM012_FF == 0.0) {
@@ -226,18 +212,12 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	ac->NEON_CARRIES_ROUTINE = NULL;
 	ac->NEON_PASS2_ROUTINE = NULL;
 
-	/* Exponent and word-size metadata for first-principles IBDWT weight
-	   computation and big/small word classification. */
 	ac->NEON_N = gwdata->n;
 	ac->NEON_NUM_B_PER_SMALL_WORD = gwdata->NUM_B_PER_SMALL_WORD;
 
-	/* Disable gwmul3_carefully — our backend doesn't support the FMA-based
-	   gwaddsub4o + gwmuladd4 path that gwmul3_carefully uses. */
 	gwdata->careful_count = 0;
 
 #ifdef ARM64_DIAGNOSTICS
-	/* Diagnostic tests gated by -DARM64_DIAGNOSTICS compile flag.
-	   Tests the exact round-trip paths that PRST uses for init checks. */
 	{
 		gwnum test_g;
 		giant test_giant;
@@ -252,24 +232,12 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 			{
 				giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
 				conv_err = gwtogiant(gwdata, test_g, result);
-				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3) {
+				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3)
 					fprintf(stderr, "[ARM64 DIAG] gianttogw(3)->gwtogiant = 3 OK\n");
-				} else {
-					fprintf(stderr, "[ARM64 DIAG] gianttogw(3)->gwtogiant FAILED: conv=%d sign=%d",
-						conv_err, result->sign);
+				else {
+					fprintf(stderr, "[ARM64 DIAG] gianttogw(3)->gwtogiant FAILED: conv=%d sign=%d", conv_err, result->sign);
 					if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
-					if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
 					fprintf(stderr, "\n");
-					{
-						unsigned long j;
-						fprintf(stderr, "[ARM64 DIAG] raw fft words[0..7]: ");
-						for (j = 0; j < 8 && j < gwdata->FFTLEN; j++) {
-							long wv = 0;
-							get_fft_value(gwdata, test_g, j, &wv);
-							fprintf(stderr, "%ld ", wv);
-						}
-						fprintf(stderr, "\n");
-					}
 				}
 				pushg(&gwdata->gdata, 1);
 			}
@@ -280,63 +248,153 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 			{
 				giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
 				conv_err = gwtogiant(gwdata, test_g, result);
-				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3) {
+				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3)
 					fprintf(stderr, "[ARM64 DIAG] dbltogw(3)->gwtogiant = 3 OK\n");
-				} else {
-					fprintf(stderr, "[ARM64 DIAG] dbltogw(3)->gwtogiant FAILED: conv=%d sign=%d",
-						conv_err, result->sign);
+				else {
+					fprintf(stderr, "[ARM64 DIAG] dbltogw(3)->gwtogiant FAILED: conv=%d sign=%d", conv_err, result->sign);
 					if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
 					fprintf(stderr, "\n");
 				}
 				pushg(&gwdata->gdata, 1);
 			}
 
-			/* Test 3: gwsquare2(3) = 9 */
+			/* Test 3: gwsquare2(3) = 9 (in-place squaring) */
 			dbltogw(gwdata, 3.0, test_g);
 			gwsquare2(gwdata, test_g, test_g, 0);
 			{
 				giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
 				conv_err = gwtogiant(gwdata, test_g, result);
-				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 9) {
+				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 9)
 					fprintf(stderr, "[ARM64 DIAG] gwsquare2(3) = 9 OK\n");
-				} else {
-					fprintf(stderr, "[ARM64 DIAG] gwsquare2(3) FAILED: conv=%d sign=%d",
-						conv_err, result->sign);
+				else {
+					fprintf(stderr, "[ARM64 DIAG] gwsquare2(3) FAILED: conv=%d sign=%d", conv_err, result->sign);
 					if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
-					if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
 					fprintf(stderr, "\n");
 				}
 				pushg(&gwdata->gdata, 1);
 			}
 
-			/* Test 4: Lucas V doubling: V(2n) = V(n)^2 - 2
-			   Start with V=4, apply V -> V^2 - 2 three times:
-			   V_2=4 -> V_4=14 -> V_8=194 -> V_16=37634 */
+			/* Test 4a: gwsquare2(4) without ADDINCONST = 16 (baseline) */
 			{
-				gwnum lucas_g = gwalloc(gwdata);
-				if (lucas_g != NULL) {
-					gwsetaddin(gwdata, -2);
-					dbltogw(gwdata, 4.0, lucas_g);
-					gwsquare2(gwdata, lucas_g, lucas_g, GWMUL_ADDINCONST);
-					gwsquare2(gwdata, lucas_g, lucas_g, GWMUL_ADDINCONST);
-					gwsquare2(gwdata, lucas_g, lucas_g, GWMUL_ADDINCONST);
-					gwsetaddin(gwdata, 0);
+				gwnum t4a = gwalloc(gwdata);
+				if (t4a != NULL) {
+					dbltogw(gwdata, 4.0, t4a);
+					gwsquare2(gwdata, t4a, t4a, 0);
 					{
 						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
-						conv_err = gwtogiant(gwdata, lucas_g, result);
-						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 37634) {
-							fprintf(stderr, "[ARM64 DIAG] Lucas V_16(P=4) = 37634 OK\n");
-						} else {
-							fprintf(stderr, "[ARM64 DIAG] Lucas V_16(P=4) FAILED: conv=%d sign=%d",
-								conv_err, result->sign);
+						conv_err = gwtogiant(gwdata, t4a, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 16)
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(4) = 16 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(4) FAILED: conv=%d sign=%d", conv_err, result->sign);
 							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
-							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
-							fprintf(stderr, "\n");
+							fprintf(stderr, " (expected 16)\n");
 						}
 						pushg(&gwdata->gdata, 1);
 					}
-					gwfree(gwdata, lucas_g);
+					gwfree(gwdata, t4a);
 				}
+			}
+
+			/* Test 4b: gwsquare2(4, GWMUL_ADDINCONST) with addin=-2 = 14 */
+			{
+				gwnum t4b = gwalloc(gwdata);
+				if (t4b != NULL) {
+					gwsetaddin(gwdata, -2);
+					dbltogw(gwdata, 4.0, t4b);
+					gwsquare2(gwdata, t4b, t4b, GWMUL_ADDINCONST);
+					gwsetaddin(gwdata, 0);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, t4b, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 14)
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(4)+addin(-2) = 14 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(4)+addin(-2) FAILED: conv=%d sign=%d", conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+							fprintf(stderr, " (expected 14)\n");
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+					gwfree(gwdata, t4b);
+				}
+			}
+
+			/* Test 4c: fresh gwnum gwsquare2(4, GWMUL_ADDINCONST) addin=-2 = 14
+			   (tests whether addin state leaks between allocations) */
+			{
+				gwnum t4c = gwalloc(gwdata);
+				if (t4c != NULL) {
+					gwsetaddin(gwdata, -2);
+					dbltogw(gwdata, 4.0, t4c);
+					gwsquare2(gwdata, t4c, t4c, GWMUL_ADDINCONST);
+					gwsetaddin(gwdata, 0);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, t4c, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 14)
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(4)+addin(-2) fresh = 14 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(4)+addin(-2) fresh FAILED: conv=%d sign=%d", conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+							fprintf(stderr, " (expected 14)\n");
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+					gwfree(gwdata, t4c);
+				}
+			}
+
+			/* Test 4d: non-in-place gwsquare2 where source != destination
+			   Store 5 in src, square into separate dst, expect 25 */
+			{
+				gwnum t4d_src = gwalloc(gwdata);
+				gwnum t4d_dst = gwalloc(gwdata);
+				if (t4d_src != NULL && t4d_dst != NULL) {
+					dbltogw(gwdata, 5.0, t4d_src);
+					gwsquare2(gwdata, t4d_src, t4d_dst, 0);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, t4d_dst, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 25)
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(5,dst) = 25 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] gwsquare2(5,dst) FAILED: conv=%d sign=%d", conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							fprintf(stderr, " (expected 25)\n");
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+				}
+				if (t4d_dst != NULL) gwfree(gwdata, t4d_dst);
+				if (t4d_src != NULL) gwfree(gwdata, t4d_src);
+			}
+
+			/* Test 4e: gwmul3(3, 5) = 15 (non-squaring multiply, ffttype=3 path) */
+			{
+				gwnum t4e_a = gwalloc(gwdata);
+				gwnum t4e_b = gwalloc(gwdata);
+				if (t4e_a != NULL && t4e_b != NULL) {
+					dbltogw(gwdata, 3.0, t4e_a);
+					dbltogw(gwdata, 5.0, t4e_b);
+					gwmul3(gwdata, t4e_a, t4e_b, t4e_a, 0);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, t4e_a, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 15)
+							fprintf(stderr, "[ARM64 DIAG] gwmul3(3,5) = 15 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] gwmul3(3,5) FAILED: conv=%d sign=%d", conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							fprintf(stderr, " (expected 15)\n");
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+				}
+				if (t4e_b != NULL) gwfree(gwdata, t4e_b);
+				if (t4e_a != NULL) gwfree(gwdata, t4e_a);
 			}
 
 			/* Test 5: 100-iteration squaring with checkpoints at 5, 10, 20, 50, 100. */
