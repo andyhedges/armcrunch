@@ -19,7 +19,7 @@ LIBS      = -L/opt/homebrew/lib -lm -lpthread -lgmp
 COMMON_CFLAGS   = -arch arm64 -O2 \
                   -I.. -I../../framework -I../../framework/arithmetic -I../../framework/gwnum \
                   -I/opt/homebrew/include \
-                  -DGMP -DARM64 -Wall -Wextra
+                  -DGMP -DARM64 -DNDEBUG -Wall -Wextra
 
 CFLAGS   = -std=c99
 CXXFLAGS = -std=gnu++17
