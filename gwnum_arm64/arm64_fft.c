@@ -414,11 +414,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	}
 
 	switch (ffttype) {
-	case 1:	/* forward FFT only using full N-point complex FFT */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
-		if (!ok) break;
-		arm64_fft(tmp1, complex_len, 0);
-		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
+	case 1:	/* forward FFT only -- no-op */
 		break;
 
 	case 2:	/* forward + square + inverse + normalize */
@@ -448,12 +444,13 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		arm64_normalize(asm_data);
 		break;
 
-	case 3:	/* forward s1 + mul by already-FFTed s2 + inverse + normalize */
+	case 3:	/* forward s1 + mul by s2 + inverse + normalize */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
 		arm64_fft(tmp1, complex_len, 0);
+		arm64_fft(tmp2, complex_len, 0);
 		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
 		arm64_fft(tmp1, complex_len, 1);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
@@ -461,11 +458,13 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		arm64_normalize(asm_data);
 		break;
 
-	case 4:	/* mul two already-FFTed operands + inverse + normalize */
+	case 4:	/* mul two operands + inverse + normalize */
 		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
 		if (!ok) break;
 		ok = arm64_pack_scrambled_to_complex(ad, s2, tmp2);
 		if (!ok) break;
+		arm64_fft(tmp1, complex_len, 0);
+		arm64_fft(tmp2, complex_len, 0);
 		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
 		arm64_fft(tmp1, complex_len, 1);
 		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
@@ -473,20 +472,11 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		arm64_normalize(asm_data);
 		break;
 
-	case 5:	/* inverse + normalize only (input already FFTed) */
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
-		if (!ok) break;
-		arm64_fft(tmp1, complex_len, 1);
-		ok = arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
-		if (!ok) break;
+	case 5:	/* inverse + normalize only -- no-op for inverse, just normalize */
 		arm64_normalize(asm_data);
 		break;
 
 	default:
-		ok = arm64_pack_scrambled_to_complex(ad, s1, tmp1);
-		if (!ok) break;
-		arm64_fft(tmp1, complex_len, 0);
-		(void)arm64_unpack_complex_to_scrambled(ad, tmp1, dest);
 		break;
 	}
 
