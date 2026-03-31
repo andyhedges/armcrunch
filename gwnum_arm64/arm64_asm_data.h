@@ -131,9 +131,9 @@ static inline double arm64_word_limit(const struct gwasm_data *ad, int big_word)
 }
 
 static inline double arm64_mulconst(const struct gwasm_data *ad) {
+	if (ad != NULL && ad->u.xmm.XMM_MULCONST[0] != 0.0) return ad->u.xmm.XMM_MULCONST[0];
 	const arm64_asm_constants *ac = arm64_constants(ad);
 	if (ac != NULL && ac->NEON_MULCONST != 0.0) return ac->NEON_MULCONST;
-	if (ad != NULL && ad->u.xmm.XMM_MULCONST[0] != 0.0) return ad->u.xmm.XMM_MULCONST[0];
 	return 1.0;
 }
 
