@@ -428,6 +428,82 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 				}
 			}
 
+			/* Test 6: identify target number and re-check core operations after stress squaring. */
+			fprintf(stderr, "[ARM64 DIAG] k=%.1f b=%lu n=%lu c=%ld\n",
+				gwdata->k, (unsigned long)gwdata->b, (unsigned long)gwdata->n, (long)gwdata->c);
+			{
+				gwnum diag_g = gwalloc(gwdata);
+				if (diag_g != NULL) {
+					int word;
+
+					dbltogw(gwdata, 3.0, diag_g);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, diag_g, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3)
+							fprintf(stderr, "[ARM64 DIAG] post5 dbltogw(3)->gwtogiant = 3 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] post5 dbltogw(3)->gwtogiant FAILED: conv=%d sign=%d", conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+							fprintf(stderr, "\n");
+							dbltogw(gwdata, 3.0, diag_g);
+							for (word = 0; word < 8; word++) {
+								fprintf(stderr, "[ARM64 DIAG] raw_fft[%d]=%.17g\n",
+									word, get_fft_value(gwdata, diag_g, (unsigned long)word));
+							}
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+
+					dbltogw(gwdata, 3.0, diag_g);
+					gwsquare2(gwdata, diag_g, diag_g, 0);
+					{
+						giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+						conv_err = gwtogiant(gwdata, diag_g, result);
+						if (conv_err >= 0 && result->sign == 1 && result->n[0] == 9)
+							fprintf(stderr, "[ARM64 DIAG] post5 gwsquare2(3) = 9 OK\n");
+						else {
+							fprintf(stderr, "[ARM64 DIAG] post5 gwsquare2(3) FAILED: conv=%d sign=%d", conv_err, result->sign);
+							if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+							if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+							fprintf(stderr, " (expected 9)\n");
+						}
+						pushg(&gwdata->gdata, 1);
+					}
+
+					if (gwdata->k > 1.0) {
+						intptr_t addin_offset = (intptr_t)ad->ADDIN_OFFSET;
+						intptr_t addin_word = addin_offset / (intptr_t)sizeof(double);
+						fprintf(stderr, "[ARM64 DIAG] ADDIN_OFFSET=%lld addin_word=%lld\n",
+							(long long)addin_offset, (long long)addin_word);
+					}
+
+					if (gwdata->k > 1.0 && gwdata->c == -1) {
+						gwsetaddin(gwdata, -2);
+						dbltogw(gwdata, 4.0, diag_g);
+						gwsquare2(gwdata, diag_g, diag_g, GWMUL_ADDINCONST);
+						gwsetaddin(gwdata, 0);
+						{
+							giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+							conv_err = gwtogiant(gwdata, diag_g, result);
+							if (conv_err >= 0 && result->sign == 1 && result->n[0] == 14)
+								fprintf(stderr, "[ARM64 DIAG] Lucas V dbl: gwsquare2(4)+addin(-2) = 14 OK\n");
+							else {
+								fprintf(stderr, "[ARM64 DIAG] Lucas V dbl FAILED: conv=%d sign=%d", conv_err, result->sign);
+								if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+								if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+								fprintf(stderr, " (expected 14)\n");
+							}
+							pushg(&gwdata->gdata, 1);
+						}
+					}
+
+					gwsetaddin(gwdata, 0);
+					gwfree(gwdata, diag_g);
+				}
+			}
+
 			gwfree(gwdata, test_g);
 		}
 	}
