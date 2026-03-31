@@ -29,10 +29,9 @@
 #define ARM64_PREFETCH_READ(addr) ((void)0)
 #endif
 
-/* Prefetch 4 cache lines (256 bytes) ahead = 16 complex values. */
 enum {
 	ARM64_CACHE_SLOTS = 32,
-	ARM64_PREFETCH_COMPLEX_AHEAD = 16
+	ARM64_PREFETCH_AHEAD = 16
 };
 
 typedef struct arm64_complex {
@@ -41,12 +40,19 @@ typedef struct arm64_complex {
 } arm64_complex;
 
 typedef struct arm64_word_cache {
-	size_t fftlen;              /* key: FFTLEN this cache was built for */
-	size_t *byte_offsets;       /* addr_offset(gwdata, word) */
-	double *fwd_weights;        /* gwfft_weight_sloppy(dd_data, word) */
-	double *inv_weights;        /* gwfft_weight_inverse_sloppy(dd_data, word) */
-	int *big_words;             /* is_big_word(gwdata, word) */
+	size_t fftlen;
+	size_t *byte_offsets;
+	double *fwd_weights;
+	double *inv_weights;
+	int *big_words;
 } arm64_word_cache;
+
+/* Per-stage contiguous twiddle tables for sequential memory access. */
+typedef struct arm64_stage_twiddles {
+	size_t n;
+	size_t num_stages;
+	double **stage_tables;  /* stage_tables[s] has half*2 doubles for stage s (m=2^(s+1)) */
+} arm64_stage_twiddles;
 
 static inline arm64_complex arm64_c_load(const double *data, size_t idx) {
 	arm64_complex z;
@@ -61,17 +67,11 @@ static inline void arm64_c_store(double *data, size_t idx, arm64_complex z) {
 }
 
 static inline arm64_complex arm64_c_add(arm64_complex a, arm64_complex b) {
-	arm64_complex z;
-	z.r = a.r + b.r;
-	z.i = a.i + b.i;
-	return z;
+	arm64_complex z; z.r = a.r + b.r; z.i = a.i + b.i; return z;
 }
 
 static inline arm64_complex arm64_c_sub(arm64_complex a, arm64_complex b) {
-	arm64_complex z;
-	z.r = a.r - b.r;
-	z.i = a.i - b.i;
-	return z;
+	arm64_complex z; z.r = a.r - b.r; z.i = a.i - b.i; return z;
 }
 
 static inline arm64_complex arm64_c_mul(arm64_complex a, arm64_complex b) {
@@ -85,14 +85,25 @@ static int arm64_is_power_of_two(size_t n) {
 	return (n != 0u) && ((n & (n - 1u)) == 0u);
 }
 
+static int arm64_log2_u32(uint32_t v) {
+	int n = 0;
+	while (v > 1u) { v >>= 1u; ++n; }
+	return n;
+}
+
+/* --- Caches --- */
+
 static double *arm64_twiddle_cache[ARM64_CACHE_SLOTS];
 static uint32_t *arm64_bitrev_cache[ARM64_CACHE_SLOTS];
+static arm64_stage_twiddles *arm64_staged_tw_cache[ARM64_CACHE_SLOTS];
 static arm64_word_cache arm64_global_word_cache = {0u, NULL, NULL, NULL, NULL};
 
 static ARM64_THREAD_LOCAL double *arm64_tls_tmp1 = NULL;
 static ARM64_THREAD_LOCAL double *arm64_tls_tmp2 = NULL;
 static ARM64_THREAD_LOCAL size_t arm64_tls_tmp1_capacity = 0u;
 static ARM64_THREAD_LOCAL size_t arm64_tls_tmp2_capacity = 0u;
+
+/* --- Word cache --- */
 
 static void arm64_free_word_cache_arrays(arm64_word_cache *cache) {
 	if (cache == NULL) return;
@@ -136,11 +147,8 @@ int arm64_ensure_word_cache(const struct gwasm_data *ad) {
 	fwd_weights = (double *)malloc(fftlen * sizeof(double));
 	inv_weights = (double *)malloc(fftlen * sizeof(double));
 	big_words = (int *)malloc(fftlen * sizeof(int));
-	if (byte_offsets == NULL || fwd_weights == NULL || inv_weights == NULL || big_words == NULL) {
-		free(byte_offsets);
-		free(fwd_weights);
-		free(inv_weights);
-		free(big_words);
+	if (!byte_offsets || !fwd_weights || !inv_weights || !big_words) {
+		free(byte_offsets); free(fwd_weights); free(inv_weights); free(big_words);
 		return 0;
 	}
 
@@ -148,7 +156,6 @@ int arm64_ensure_word_cache(const struct gwasm_data *ad) {
 	for (word = 0; word < fftlen; ++word) {
 		byte_offsets[word] = (size_t)addr_offset(ad->gwdata, (unsigned long)word);
 		big_words[word] = arm64_is_big_word(ad, word);
-
 		if (rational_fft) {
 			fwd_weights[word] = 1.0;
 			inv_weights[word] = 1.0;
@@ -170,35 +177,27 @@ int arm64_ensure_word_cache(const struct gwasm_data *ad) {
 	return 1;
 }
 
-static int arm64_reserve_tls_buffer(double **buffer, size_t *capacity, size_t required_doubles) {
-	double *new_buffer;
+/* --- TLS buffer management --- */
 
-	if (required_doubles == 0u) return 0;
-	if (*buffer != NULL && *capacity >= required_doubles) return 1;
-
-	new_buffer = (double *)realloc(*buffer, required_doubles * sizeof(double));
-	if (new_buffer == NULL) return 0;
-
-	*buffer = new_buffer;
-	*capacity = required_doubles;
+static int arm64_reserve_tls_buffer(double **buffer, size_t *capacity, size_t required) {
+	double *nb;
+	if (required == 0u) return 0;
+	if (*buffer != NULL && *capacity >= required) return 1;
+	nb = (double *)realloc(*buffer, required * sizeof(double));
+	if (nb == NULL) return 0;
+	*buffer = nb;
+	*capacity = required;
 	return 1;
 }
 
-static int arm64_log2_u32(uint32_t v) {
-	int n = 0;
-	while (v > 1u) { v >>= 1u; ++n; }
-	return n;
-}
+/* --- Base twiddle table (used to build per-stage tables) --- */
 
 static const double *arm64_get_twiddle_table(size_t n) {
-	size_t j;
-	size_t half;
 	int log2_n;
-	double *table;
-	double angle_base;
+	size_t j, half;
+	double *table, angle_base;
 
 	if (n < 2u || !arm64_is_power_of_two(n) || n > (size_t)UINT32_MAX) return NULL;
-
 	log2_n = arm64_log2_u32((uint32_t)n);
 	if (log2_n < 0 || log2_n >= ARM64_CACHE_SLOTS) return NULL;
 
@@ -220,25 +219,69 @@ static const double *arm64_get_twiddle_table(size_t n) {
 	return table;
 }
 
+/* --- Per-stage contiguous twiddle tables --- */
+
+static const arm64_stage_twiddles *arm64_get_staged_twiddles(size_t n) {
+	int log2_n;
+	arm64_stage_twiddles *stw;
+	size_t s, m, half, j, tw_step;
+	const double *base_table;
+
+	if (n < 2u || !arm64_is_power_of_two(n) || n > (size_t)UINT32_MAX) return NULL;
+	log2_n = arm64_log2_u32((uint32_t)n);
+	if (log2_n < 1 || log2_n >= ARM64_CACHE_SLOTS) return NULL;
+
+	if (arm64_staged_tw_cache[log2_n] != NULL)
+		return arm64_staged_tw_cache[log2_n];
+
+	base_table = arm64_get_twiddle_table(n);
+	if (base_table == NULL) return NULL;
+
+	stw = (arm64_stage_twiddles *)malloc(sizeof(arm64_stage_twiddles));
+	if (stw == NULL) return NULL;
+
+	stw->n = n;
+	stw->num_stages = (size_t)log2_n;
+	stw->stage_tables = (double **)calloc((size_t)log2_n, sizeof(double *));
+	if (stw->stage_tables == NULL) { free(stw); return NULL; }
+
+	for (s = 0, m = 2u; m <= n; m *= 2u, ++s) {
+		half = m / 2u;
+		tw_step = n / m;
+		stw->stage_tables[s] = (double *)malloc(half * 2u * sizeof(double));
+		if (stw->stage_tables[s] == NULL) {
+			size_t c;
+			for (c = 0; c < s; ++c) free(stw->stage_tables[c]);
+			free(stw->stage_tables);
+			free(stw);
+			return NULL;
+		}
+		for (j = 0; j < half; ++j) {
+			size_t ti = j * tw_step;
+			stw->stage_tables[s][2u * j]     = base_table[2u * ti];
+			stw->stage_tables[s][2u * j + 1u] = base_table[2u * ti + 1u];
+		}
+	}
+
+	arm64_staged_tw_cache[log2_n] = stw;
+	return stw;
+}
+
+/* --- Bit-reverse permutation --- */
+
 static uint32_t arm64_reverse_bits(uint32_t x, unsigned bits) {
 	uint32_t y = 0;
 	unsigned i;
-	for (i = 0; i < bits; ++i) {
-		y = (y << 1u) | (x & 1u);
-		x >>= 1u;
-	}
+	for (i = 0; i < bits; ++i) { y = (y << 1u) | (x & 1u); x >>= 1u; }
 	return y;
 }
 
-/* Cached bit-reverse permutation table, keyed by log2(n). */
 static const uint32_t *arm64_get_bitrev_table(size_t n) {
 	int log2_n;
-	unsigned bits;
 	size_t i;
 	uint32_t *table;
 
 	if (n < 2u || !arm64_is_power_of_two(n) || n > (size_t)UINT32_MAX) return NULL;
-
 	log2_n = arm64_log2_u32((uint32_t)n);
 	if (log2_n < 0 || log2_n >= ARM64_CACHE_SLOTS) return NULL;
 
@@ -248,9 +291,8 @@ static const uint32_t *arm64_get_bitrev_table(size_t n) {
 	table = (uint32_t *)malloc(n * sizeof(uint32_t));
 	if (table == NULL) return NULL;
 
-	bits = (unsigned)log2_n;
 	for (i = 0; i < n; ++i)
-		table[i] = arm64_reverse_bits((uint32_t)i, bits);
+		table[i] = arm64_reverse_bits((uint32_t)i, (unsigned)log2_n);
 
 	arm64_bitrev_cache[log2_n] = table;
 	return table;
@@ -276,7 +318,7 @@ static void arm64_bit_reverse_permute(double *data, size_t n) {
 		return;
 	}
 
-	/* Fallback if cache allocation fails. */
+	/* Fallback */
 	{
 		unsigned bits = (unsigned)arm64_log2_u32((uint32_t)n);
 		for (i = 0; i < n; ++i) {
@@ -291,6 +333,8 @@ static void arm64_bit_reverse_permute(double *data, size_t n) {
 	}
 }
 
+/* --- Inverse scaling --- */
+
 static void arm64_scale_inverse(double *data, size_t complex_len) {
 	size_t words = complex_len * 2u;
 	double inv_n = 1.0 / (double)complex_len;
@@ -300,8 +344,7 @@ static void arm64_scale_inverse(double *data, size_t complex_len) {
 		float64x2_t inv = vdupq_n_f64(inv_n);
 		for (i = 0; i + 1u < words; i += 2u) {
 			float64x2_t v = vld1q_f64(&data[i]);
-			v = vmulq_f64(v, inv);
-			vst1q_f64(&data[i], v);
+			vst1q_f64(&data[i], vmulq_f64(v, inv));
 		}
 		if (i < words) data[i] *= inv_n;
 	}
@@ -310,65 +353,55 @@ static void arm64_scale_inverse(double *data, size_t complex_len) {
 #endif
 }
 
-static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twiddles, int inverse) {
+/* --- FFT butterfly with contiguous per-stage twiddle access --- */
+
+static void arm64_fft_stage_contiguous(double *data, size_t n, size_t m, const double *stage_tw, int inverse) {
 	size_t half = m / 2u;
-	size_t tw_step = n / m;
 	double imag_sign = inverse ? -1.0 : 1.0;
 	size_t k;
 
 	for (k = 0; k < n; k += m) {
 		size_t j = 0u;
-		size_t tw_idx = 0u;
 #if defined(__aarch64__) || defined(ARM64)
-		/* 4-wide NEON butterfly: process 4 complex elements per iteration */
-		for (; j + 3u < half; j += 4u, tw_idx += 4u * tw_step) {
-			size_t t0 = tw_idx;
-			size_t t1 = t0 + tw_step;
-			size_t t2 = t1 + tw_step;
-			size_t t3 = t2 + tw_step;
+		/* 4-wide NEON butterfly with contiguous twiddle loads via vld2q */
+		for (; j + 3u < half; j += 4u) {
 			double *a0_ptr = &data[(k + j) * 2u];
 			double *b0_ptr = &data[(k + j + half) * 2u];
-			double *a1_ptr = a0_ptr + 4u;   /* +4 doubles = +2 complex */
+			double *a1_ptr = a0_ptr + 4u;
 			double *b1_ptr = b0_ptr + 4u;
+			const double *tw0_ptr = &stage_tw[j * 2u];
+			const double *tw1_ptr = tw0_ptr + 4u;
+			float64x2x2_t tw0_pair, tw1_pair;
 			float64x2_t w_re0, w_im0, w_re1, w_im1;
 			float64x2x2_t va0, vb0, va1, vb1;
 			float64x2_t bw_re0, bw_im0, bw_re1, bw_im1;
 			float64x2x2_t out_top, out_bot;
-			double w_re_pair0[2], w_im_pair0[2];
-			double w_re_pair1[2], w_im_pair1[2];
 
-			/* Prefetch ahead */
 			{
-				size_t pf_j = j + (size_t)ARM64_PREFETCH_COMPLEX_AHEAD;
-				if (pf_j < half) {
-					ARM64_PREFETCH_READ(&data[(k + pf_j) * 2u]);
-					ARM64_PREFETCH_READ(&data[(k + pf_j + half) * 2u]);
+				size_t pf = j + (size_t)ARM64_PREFETCH_AHEAD;
+				if (pf < half) {
+					ARM64_PREFETCH_READ(&data[(k + pf) * 2u]);
+					ARM64_PREFETCH_READ(&data[(k + pf + half) * 2u]);
+					ARM64_PREFETCH_READ(&stage_tw[pf * 2u]);
 				}
 			}
 
-			w_re_pair0[0] = twiddles[2u * t0];
-			w_re_pair0[1] = twiddles[2u * t1];
-			w_im_pair0[0] = imag_sign * twiddles[2u * t0 + 1u];
-			w_im_pair0[1] = imag_sign * twiddles[2u * t1 + 1u];
-			w_re_pair1[0] = twiddles[2u * t2];
-			w_re_pair1[1] = twiddles[2u * t3];
-			w_im_pair1[0] = imag_sign * twiddles[2u * t2 + 1u];
-			w_im_pair1[1] = imag_sign * twiddles[2u * t3 + 1u];
-
-			w_re0 = vld1q_f64(w_re_pair0);
-			w_im0 = vld1q_f64(w_im_pair0);
-			w_re1 = vld1q_f64(w_re_pair1);
-			w_im1 = vld1q_f64(w_im_pair1);
+			/* Contiguous twiddle load: vld2q deinterleaves re/im */
+			tw0_pair = vld2q_f64(tw0_ptr);
+			tw1_pair = vld2q_f64(tw1_ptr);
+			w_re0 = tw0_pair.val[0];
+			w_im0 = vmulq_n_f64(tw0_pair.val[1], imag_sign);
+			w_re1 = tw1_pair.val[0];
+			w_im1 = vmulq_n_f64(tw1_pair.val[1], imag_sign);
 
 			va0 = vld2q_f64(a0_ptr);
 			vb0 = vld2q_f64(b0_ptr);
 			va1 = vld2q_f64(a1_ptr);
 			vb1 = vld2q_f64(b1_ptr);
 
-			/* Complex multiply b0 * w0 */
+			/* Interleaved complex multiply for ILP */
 			bw_re0 = vmulq_f64(vb0.val[0], w_re0);
 			bw_im0 = vmulq_f64(vb0.val[0], w_im0);
-			/* Complex multiply b1 * w1 (interleaved for ILP) */
 			bw_re1 = vmulq_f64(vb1.val[0], w_re1);
 			bw_im1 = vmulq_f64(vb1.val[0], w_im1);
 
@@ -377,7 +410,6 @@ static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twid
 			bw_re1 = vfmsq_f64(bw_re1, vb1.val[1], w_im1);
 			bw_im1 = vfmaq_f64(bw_im1, vb1.val[1], w_re1);
 
-			/* Butterfly pair 0 */
 			out_top.val[0] = vaddq_f64(va0.val[0], bw_re0);
 			out_top.val[1] = vaddq_f64(va0.val[1], bw_im0);
 			out_bot.val[0] = vsubq_f64(va0.val[0], bw_re0);
@@ -385,7 +417,6 @@ static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twid
 			vst2q_f64(a0_ptr, out_top);
 			vst2q_f64(b0_ptr, out_bot);
 
-			/* Butterfly pair 1 */
 			out_top.val[0] = vaddq_f64(va1.val[0], bw_re1);
 			out_top.val[1] = vaddq_f64(va1.val[1], bw_im1);
 			out_bot.val[0] = vsubq_f64(va1.val[0], bw_re1);
@@ -395,22 +426,17 @@ static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twid
 		}
 
 		/* 2-wide NEON tail */
-		for (; j + 1u < half; j += 2u, tw_idx += 2u * tw_step) {
-			size_t t0 = tw_idx;
-			size_t t1 = tw_idx + tw_step;
-			double w_re_pair[2], w_im_pair[2];
+		for (; j + 1u < half; j += 2u) {
+			const double *tw_ptr = &stage_tw[j * 2u];
+			float64x2x2_t tw_pair;
 			float64x2_t w_re, w_im;
 			float64x2x2_t va, vb;
 			float64x2_t bw_re, bw_im;
 			float64x2x2_t out0, out1;
 
-			w_re_pair[0] = twiddles[2u * t0];
-			w_re_pair[1] = twiddles[2u * t1];
-			w_im_pair[0] = imag_sign * twiddles[2u * t0 + 1u];
-			w_im_pair[1] = imag_sign * twiddles[2u * t1 + 1u];
-
-			w_re = vld1q_f64(w_re_pair);
-			w_im = vld1q_f64(w_im_pair);
+			tw_pair = vld2q_f64(tw_ptr);
+			w_re = tw_pair.val[0];
+			w_im = vmulq_n_f64(tw_pair.val[1], imag_sign);
 
 			va = vld2q_f64(&data[(k + j) * 2u]);
 			vb = vld2q_f64(&data[(k + j + half) * 2u]);
@@ -429,17 +455,16 @@ static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twid
 			vst2q_f64(&data[(k + j + half) * 2u], out1);
 		}
 #endif
-		/* Scalar tail for remaining elements */
-		for (; j < half; ++j, tw_idx += tw_step) {
+		/* Scalar tail */
+		for (; j < half; ++j) {
 			size_t i0 = k + j;
 			size_t i1 = i0 + half;
 			arm64_complex a = arm64_c_load(data, i0);
 			arm64_complex b = arm64_c_load(data, i1);
-			arm64_complex w;
-			arm64_complex bw;
+			arm64_complex w, bw;
 
-			w.r = twiddles[2u * tw_idx];
-			w.i = imag_sign * twiddles[2u * tw_idx + 1u];
+			w.r = stage_tw[2u * j];
+			w.i = imag_sign * stage_tw[2u * j + 1u];
 			bw = arm64_c_mul(b, w);
 
 			arm64_c_store(data, i0, arm64_c_add(a, bw));
@@ -448,26 +473,26 @@ static void arm64_fft_stage(double *data, size_t n, size_t m, const double *twid
 	}
 }
 
-/* Radix-2 Cooley-Tukey DIT FFT (forward) or inverse. */
+/* Radix-2 Cooley-Tukey DIT FFT using per-stage contiguous twiddle tables. */
 static void arm64_fft(double *data, size_t n, int inverse) {
-	size_t m;
-	const double *twiddles;
+	size_t m, s;
+	const arm64_stage_twiddles *stw;
 
 	if (data == NULL || n < 2u || !arm64_is_power_of_two(n)) return;
 
-	twiddles = arm64_get_twiddle_table(n);
-	if (twiddles == NULL) return;
+	stw = arm64_get_staged_twiddles(n);
+	if (stw == NULL) return;
 
 	arm64_bit_reverse_permute(data, n);
 
-	for (m = 2u; m <= n; m *= 2u)
-		arm64_fft_stage(data, n, m, twiddles, inverse);
+	for (s = 0, m = 2u; m <= n; m *= 2u, ++s)
+		arm64_fft_stage_contiguous(data, n, m, stw->stage_tables[s], inverse);
 
 	if (inverse) arm64_scale_inverse(data, n);
 }
 
-/* Unscramble FFTLEN real words from gwnum layout into a contiguous complex array
-   (each word becomes a complex number with zero imaginary part). */
+/* --- Pack/unpack between gwnum scrambled layout and contiguous complex --- */
+
 static int arm64_pack_scrambled_to_complex(const struct gwasm_data *ad, const arm64_word_cache *cache, const double *src, double *dst_complex) {
 	size_t words, j;
 	const char *src_bytes;
@@ -478,8 +503,6 @@ static int arm64_pack_scrambled_to_complex(const struct gwasm_data *ad, const ar
 	if (cache->fftlen != words || cache->byte_offsets == NULL) return 0;
 
 	src_bytes = (const char *)src;
-
-	/* First unscramble into temporary contiguous order at the start of dst_complex */
 	for (j = 0; j < words; ++j)
 		dst_complex[j] = *(const double *)(src_bytes + cache->byte_offsets[j]);
 
@@ -492,7 +515,6 @@ static int arm64_pack_scrambled_to_complex(const struct gwasm_data *ad, const ar
 	return 1;
 }
 
-/* Extract real parts from complex array and rescramble into gwnum layout. */
 static int arm64_unpack_complex_to_scrambled(const struct gwasm_data *ad, const arm64_word_cache *cache, const double *src_complex, double *dst) {
 	size_t words, j;
 	char *dst_bytes;
@@ -509,6 +531,8 @@ static int arm64_unpack_complex_to_scrambled(const struct gwasm_data *ad, const 
 	return 1;
 }
 
+/* --- Pointwise operations --- */
+
 static void arm64_pointwise_mul(double *dst, const double *a, const double *b, size_t complex_len) {
 	size_t i = 0;
 #if defined(__aarch64__) || defined(ARM64)
@@ -520,8 +544,7 @@ static void arm64_pointwise_mul(double *dst, const double *a, const double *b, s
 		float64x2x2_t out;
 		re = vfmsq_f64(re, va.val[1], vb.val[1]);
 		im = vfmaq_f64(im, va.val[1], vb.val[0]);
-		out.val[0] = re;
-		out.val[1] = im;
+		out.val[0] = re; out.val[1] = im;
 		vst2q_f64(&dst[i * 2u], out);
 	}
 #endif
@@ -555,6 +578,8 @@ static void arm64_pointwise_square(double *dst, const double *src, size_t comple
 	}
 }
 
+/* --- Normalization dispatch --- */
+
 static void arm64_normalize(struct gwasm_data *asm_data) {
 	struct gwasm_data *ad = asm_data;
 	if (ad != NULL && ad->NORMRTN != NULL)
@@ -563,25 +588,22 @@ static void arm64_normalize(struct gwasm_data *asm_data) {
 		arm64_norm_plain(asm_data);
 }
 
+/* --- Main FFT entry point --- */
+
 void arm64_fft_entry(struct gwasm_data *asm_data) {
 	struct gwasm_data *ad = asm_data;
 	const arm64_word_cache *word_cache;
-	double *dest;
-	double *s1;
-	double *s2;
-	size_t words;
-	size_t complex_len;
+	double *dest, *s1, *s2;
+	size_t words, complex_len, required_doubles;
 	unsigned int ffttype;
-	size_t required_doubles;
-	double *tmp1 = NULL;
-	double *tmp2 = NULL;
+	double *tmp1 = NULL, *tmp2 = NULL;
 	int ok = 1;
 
 	if (ad == NULL) return;
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
 
-	/* Disable gwmul3_carefully at runtime as a belt-and-suspenders measure. */
+	/* Disable gwmul3_carefully at runtime (belt-and-suspenders). */
 	if (ad->gwdata != NULL)
 		ad->gwdata->careful_count = 0;
 
@@ -590,14 +612,10 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 
 	if (!arm64_ensure_word_cache(ad)) return;
 	word_cache = arm64_get_word_cache();
-	if (word_cache == NULL ||
-		word_cache->fftlen != words ||
-		word_cache->byte_offsets == NULL ||
-		word_cache->fwd_weights == NULL ||
-		word_cache->inv_weights == NULL ||
-		word_cache->big_words == NULL) {
+	if (word_cache == NULL || word_cache->fftlen != words ||
+		!word_cache->byte_offsets || !word_cache->fwd_weights ||
+		!word_cache->inv_weights || !word_cache->big_words)
 		return;
-	}
 
 	complex_len = words;
 	if (!arm64_is_power_of_two(complex_len)) return;
@@ -616,7 +634,6 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 		required_doubles = 2u * words;
 		if (!arm64_reserve_tls_buffer(&arm64_tls_tmp1, &arm64_tls_tmp1_capacity, required_doubles)) return;
 		tmp1 = arm64_tls_tmp1;
-
 		if (ffttype == 3u || ffttype == 4u) {
 			if (!arm64_reserve_tls_buffer(&arm64_tls_tmp2, &arm64_tls_tmp2_capacity, required_doubles)) return;
 			tmp2 = arm64_tls_tmp2;
@@ -624,7 +641,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	}
 
 	switch (ffttype) {
-	case 2:	/* forward + square + inverse + normalize */
+	case 2:
 		ok = arm64_pack_scrambled_to_complex(ad, word_cache, s1, tmp1);
 		if (!ok) break;
 		arm64_fft(tmp1, complex_len, 0);
