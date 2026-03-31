@@ -18,6 +18,10 @@ echo "=== gwnum.a built successfully ==="
 if [ -d "$PRST_DIR/src" ]; then
     echo "=== PRST found at $PRST_DIR, building... ==="
 
+    cd "$PRST_DIR"
+    git submodule update --init --recursive 2>/dev/null || true
+    cd "$ARMCRUNCH_DIR/gwnum_arm64"
+
     # Install gwnum.a
     mkdir -p "$PRST_DIR/framework/gwnum/macarm64"
     cp gwnum.a "$PRST_DIR/framework/gwnum/macarm64/"
