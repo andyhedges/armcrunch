@@ -189,6 +189,7 @@ else:
                 ARM64_RESULT=$(echo "$ARM64_OUT" | grep -E 'prime|composite' | head -1)
             else
                 echo "  ARM64:   FAILED (exit code $ARM64_EXIT)"
+                echo "$ARM64_OUT" | grep '\[ARM64' || true
                 BENCH_FAILURES=$((BENCH_FAILURES + 1))
             fi
         fi
