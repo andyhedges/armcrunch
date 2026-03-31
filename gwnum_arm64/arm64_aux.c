@@ -31,7 +31,8 @@ void arm64_gw_addq(struct gwasm_data *asm_data) {
 	if (dst == NULL || s1 == NULL || s2 == NULL || words == 0) return;
 
 	addq_count++;
-	if (addq_count <= 3) fprintf(stderr, "[ARM64 ADDQ #%d] words=%zu\n", addq_count, words);
+	if (addq_count <= 3) fprintf(stderr, "[ARM64 ADDQ #%d] words=%zu dst=%p s1=%p s2=%p\n",
+		addq_count, words, (void*)dst, (void*)s1, (void*)s2);
 
 #if defined(__aarch64__) || defined(ARM64)
 	for (i = 0; i + 1u < words; i += 2u) {
@@ -49,8 +50,10 @@ void arm64_gw_add(struct gwasm_data *asm_data) {
 	static int add_count = 0;
 	struct gwasm_data *ad = asm_data;
 
+	if (ad == NULL) return;
+
 	add_count++;
-	if (add_count <= 3) fprintf(stderr, "[ARM64 ADD #%d]\n", add_count);
+	if (add_count <= 3) fprintf(stderr, "[ARM64 ADD #%d] dst=%p\n", add_count, (void*)ad->DESTARG);
 
 	arm64_gw_addq(asm_data);
 
@@ -202,7 +205,8 @@ void arm64_gw_muls(struct gwasm_data *asm_data) {
 	mul = ad->DBLARG;
 
 	muls_count++;
-	if (muls_count <= 3) fprintf(stderr, "[ARM64 MULS #%d] words=%zu mul=%.6g\n", muls_count, words, mul);
+	if (muls_count <= 3) fprintf(stderr, "[ARM64 MULS #%d] words=%zu mul=%.6g dst=%p\n",
+		muls_count, words, mul, (void*)dst);
 
 	if (src != NULL && src != dst) {
 		memmove(dst, src, words * sizeof(double));
