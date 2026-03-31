@@ -139,6 +139,20 @@ while i < n:
         i += 1
         continue
 
+    # 6. Skip gwmul3_carefully on ARM64 by guarding the careful_count check
+    if 'if (gwdata->careful_count > 0)' in line and 'careful_count--' not in line:
+        out.append('#if !defined(ARM64) && !defined(__aarch64__)\n')
+        out.append(line)
+        i += 1
+        while i < n:
+            out.append(lines[i])
+            if lines[i].strip() == '}':
+                i += 1
+                break
+            i += 1
+        out.append('#endif\n')
+        continue
+
     # Close the ARM64 #else block before "Default normalization"
     if gwprocptrs_else_open and '/* Default normalization routines and behaviors */' in line:
         out.append('#endif /* !ARM64 - GWPROCPTRS */\n')
