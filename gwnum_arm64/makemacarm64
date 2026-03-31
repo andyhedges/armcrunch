@@ -17,12 +17,15 @@ ARM64_SRC  ?= .
 BUILD_DIR  ?= build/macarm64
 PATCHED_DIR = $(BUILD_DIR)/patched
 
-CFLAGS   = -arch arm64 -O2 -std=gnu99 -DARM64 -Wno-unused-result \
+CFLAGS   = -arch arm64 -O3 -std=gnu99 -DARM64 -DNDEBUG -Wno-unused-result \
            -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR) \
            -I$(GWNUM_PARENT) -I$(GWNUM_PARENT)/sqlite-amalgamation-3420000
 CPPFLAGS_CXX = -arch arm64 -O2 -std=c++11 -DARM64 -DNDEBUG \
            -I$(GWNUM_SRC) -I$(ARM64_SRC) -I$(PATCHED_DIR) \
            -I$(GWNUM_PARENT) -I$(GWNUM_PARENT)/qd
+
+# ARM64 backend hot-path modules get aggressive optimization
+ARM64_CFLAGS = $(CFLAGS) -O3 -mcpu=apple-m1
 
 LIB = gwnum.a
 
@@ -108,23 +111,23 @@ $(BUILD_DIR)/gwdbldbl.o: $(PATCH_STAMP)
 
 $(BUILD_DIR)/arm64_gwinfo.o: $(ARM64_SRC)/arm64_gwinfo.c $(ARM64_SRC)/arm64_asm_data.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(ARM64_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/arm64_fft.o: $(ARM64_SRC)/arm64_fft.c $(ARM64_SRC)/arm64_asm_data.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(ARM64_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/arm64_aux.o: $(ARM64_SRC)/arm64_aux.c $(ARM64_SRC)/arm64_asm_data.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(ARM64_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/arm64_norm.o: $(ARM64_SRC)/arm64_norm.c $(ARM64_SRC)/arm64_asm_data.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(ARM64_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/gwnum_arm64_integration.o: $(ARM64_SRC)/gwnum_arm64_integration.c $(ARM64_SRC)/arm64_asm_data.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(ARM64_CFLAGS) -c $< -o $@
 
 # --- Convenience targets ---
 

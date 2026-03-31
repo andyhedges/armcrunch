@@ -6,6 +6,17 @@
 #include <math.h>
 #include <stddef.h>
 
+typedef struct arm64_word_cache {
+	size_t fftlen;
+	size_t *byte_offsets;
+	double *fwd_weights;
+	double *inv_weights;
+	int *big_words;
+} arm64_word_cache;
+
+extern int arm64_ensure_word_cache(const struct gwasm_data *ad);
+extern const arm64_word_cache *arm64_get_word_cache(void);
+
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
 	if (ad != NULL && ad->gwdata != NULL) {
 		return (size_t)addr_offset(ad->gwdata, (unsigned long)word);
@@ -42,22 +53,39 @@ static inline double arm64_gw_inverse_weight(const struct gwasm_data *ad, size_t
 	return arm64_inverse_weight_at(ad, word);
 }
 
-/* Convert ADDIN_OFFSET (byte offset into FFT buffer) to a logical word index
-   by finding the word whose addr_offset matches. Returns FFTLEN (invalid) if
-   no match is found. */
-static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, uint32_t byte_offset) {
+/* Convert ADDIN_OFFSET (byte offset into FFT buffer) to a logical word index.
+   Returns FFTLEN (invalid) if no match is found. */
+static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, const arm64_word_cache *cache, uint32_t byte_offset) {
 	size_t words, w;
-	if (ad == NULL || ad->gwdata == NULL) return 0;
+
+	if (ad == NULL) return 0;
 	words = arm64_data_words(ad);
+
+	if (cache != NULL && cache->fftlen == words && cache->byte_offsets != NULL) {
+		for (w = 0; w < words; ++w) {
+			if ((uint32_t)cache->byte_offsets[w] == byte_offset)
+				return w;
+		}
+		return words;
+	}
+
+	if (ad->gwdata == NULL) return words;
 	for (w = 0; w < words; ++w) {
 		if ((uint32_t)addr_offset(ad->gwdata, (unsigned long)w) == byte_offset)
 			return w;
 	}
-	return words; /* not found */
+	return words;
 }
 
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
 	struct gwasm_data *ad = asm_data;
+	const arm64_word_cache *cache = NULL;
+	const size_t *byte_offsets = NULL;
+	const double *fwd_weights = NULL;
+	const double *inv_weights = NULL;
+	const int *big_words = NULL;
+	char *buffer_bytes = NULL;
+	int use_cached_tables = 0;
 	size_t words;
 	size_t word;
 	double carry = 0.0;
@@ -73,12 +101,29 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	words = arm64_data_words(ad);
 	if (words == 0) return;
 
+	if (arm64_ensure_word_cache(ad)) {
+		cache = arm64_get_word_cache();
+		if (cache != NULL &&
+			cache->fftlen == words &&
+			cache->byte_offsets != NULL &&
+			cache->fwd_weights != NULL &&
+			cache->inv_weights != NULL &&
+			cache->big_words != NULL) {
+			byte_offsets = cache->byte_offsets;
+			fwd_weights = cache->fwd_weights;
+			inv_weights = cache->inv_weights;
+			big_words = cache->big_words;
+			buffer_bytes = (char *)buffer;
+			use_cached_tables = 1;
+		}
+	}
+
 	maxerr = ad->MAXERR;
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
 
 	/* Convert ADDIN_OFFSET from byte offset to logical word index. */
-	addin_word = arm64_addin_offset_to_word(ad, ad->ADDIN_OFFSET);
+	addin_word = arm64_addin_offset_to_word(ad, use_cached_tables ? cache : NULL, ad->ADDIN_OFFSET);
 
 	/* raw_gwsetaddin pre-multiplies ADDIN_VALUE by weight(word) * FFTLEN/2 / k
 	   for the x86 assembly normalization which operates on raw FFT output
@@ -91,7 +136,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	if (ad->ADDIN_VALUE != 0.0 && ad->gwdata != NULL && addin_word < words) {
 		double k = ad->gwdata->k;
 		double fftlen_half = (double)ad->gwdata->FFTLEN * 0.5;
-		double weight_at_addin = arm64_gw_forward_weight(ad, addin_word);
+		double weight_at_addin = use_cached_tables ? fwd_weights[addin_word] : arm64_gw_forward_weight(ad, addin_word);
 		double prescale;
 		if (k == 0.0) k = 1.0;  /* guard against divide-by-zero */
 		prescale = weight_at_addin * fftlen_half / k;
@@ -101,52 +146,97 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			addin_integer = ad->ADDIN_VALUE;
 	}
 
-	for (word = 0; word < words; ++word) {
-		int big_word = arm64_is_big_word(ad, word);
-		double base = arm64_word_base(ad, big_word);
-		double inv_base = arm64_word_base_inverse(ad, big_word);
-		double value = arm64_load_scrambled_word(ad, buffer, word);
-		double rounded;
-		double carry_out;
-		double digit;
-		double stored;
+	if (use_cached_tables) {
+		double small_base = arm64_word_base(ad, 0);
+		double big_base_val = arm64_word_base(ad, 1);
+		double small_inv_base = arm64_word_base_inverse(ad, 0);
+		double big_inv_base = arm64_word_base_inverse(ad, 1);
 
-		/* Undo IBDWT weight using gwnum's own double-double precision function. */
-		value *= arm64_gw_inverse_weight(ad, word);
+		for (word = 0; word < words; ++word) {
+			double base = big_words[word] ? big_base_val : small_base;
+			double inv_base = big_words[word] ? big_inv_base : small_inv_base;
+			double value = *(double *)(buffer_bytes + byte_offsets[word]);
+			double rounded;
+			double carry_out;
+			double digit;
+			double stored;
 
-		/* Optional mulconst path. */
-		if (use_mulconst) value *= mulconst;
+			value *= inv_weights[word];
 
-		/* Optional addin at the configured word (in unweighted integer domain). */
-		if (word == addin_word) {
-			value += addin_integer;
-			value += postaddin_integer;
+			if (use_mulconst) value *= mulconst;
+
+			if (word == addin_word) {
+				value += addin_integer;
+				value += postaddin_integer;
+			}
+
+			rounded = nearbyint(value);
+			if (errchk) {
+				double err = fabs(value - rounded);
+				if (err > maxerr) maxerr = err;
+			}
+
+			rounded += carry;
+			if (base != 0.0) {
+				carry_out = nearbyint(rounded * inv_base);
+			} else {
+				carry_out = 0.0;
+			}
+
+			digit = rounded - carry_out * base;
+			stored = digit * fwd_weights[word];
+			*(double *)(buffer_bytes + byte_offsets[word]) = stored;
+
+			carry = carry_out;
 		}
+	} else {
+		for (word = 0; word < words; ++word) {
+			int big_word = arm64_is_big_word(ad, word);
+			double base = arm64_word_base(ad, big_word);
+			double inv_base = arm64_word_base_inverse(ad, big_word);
+			double value = arm64_load_scrambled_word(ad, buffer, word);
+			double rounded;
+			double carry_out;
+			double digit;
+			double stored;
 
-		/* Round to nearest integer and track roundoff error. */
-		rounded = nearbyint(value);
-		if (errchk) {
-			double err = fabs(value - rounded);
-			if (err > maxerr) maxerr = err;
+			/* Undo IBDWT weight using gwnum's own double-double precision function. */
+			value *= arm64_gw_inverse_weight(ad, word);
+
+			/* Optional mulconst path. */
+			if (use_mulconst) value *= mulconst;
+
+			/* Optional addin at the configured word (in unweighted integer domain). */
+			if (word == addin_word) {
+				value += addin_integer;
+				value += postaddin_integer;
+			}
+
+			/* Round to nearest integer and track roundoff error. */
+			rounded = nearbyint(value);
+			if (errchk) {
+				double err = fabs(value - rounded);
+				if (err > maxerr) maxerr = err;
+			}
+
+			/* Add incoming carry and ALWAYS extract outgoing carry. */
+			rounded += carry;
+			if (base != 0.0) {
+				carry_out = nearbyint(rounded * inv_base);
+			} else {
+				carry_out = 0.0;
+			}
+
+			/* Balanced digit after carry extraction. */
+			digit = rounded - carry_out * base;
+
+			/* Re-apply forward weight using gwnum's own function for exact match
+			   with what set_fft_value/get_fft_value expect. */
+			stored = digit * arm64_gw_forward_weight(ad, word);
+			arm64_store_scrambled_word(ad, buffer, word, stored);
+
+			carry = carry_out;
 		}
-
-		/* Add incoming carry and ALWAYS extract outgoing carry. */
-		rounded += carry;
-		if (base != 0.0) {
-			carry_out = nearbyint(rounded * inv_base);
-		} else {
-			carry_out = 0.0;
-		}
-
-		/* Balanced digit after carry extraction. */
-		digit = rounded - carry_out * base;
-
-		/* Re-apply forward weight using gwnum's own function for exact match
-		   with what set_fft_value/get_fft_value expect. */
-		stored = digit * arm64_gw_forward_weight(ad, word);
-		arm64_store_scrambled_word(ad, buffer, word, stored);
-
-		carry = carry_out;
 	}
 
 	/* Wraparound carry: multiply by -c and add into word 0 (unweighted domain). */
@@ -164,11 +254,19 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 		wrap_carry = carry * minus_c;
 
-		w0 = arm64_load_scrambled_word(ad, buffer, 0u);
-		w0 *= arm64_gw_inverse_weight(ad, 0u);
-		w0 += wrap_carry;
-		w0 *= arm64_gw_forward_weight(ad, 0u);
-		arm64_store_scrambled_word(ad, buffer, 0u, w0);
+		if (use_cached_tables) {
+			w0 = *(double *)(buffer_bytes + byte_offsets[0u]);
+			w0 *= inv_weights[0u];
+			w0 += wrap_carry;
+			w0 *= fwd_weights[0u];
+			*(double *)(buffer_bytes + byte_offsets[0u]) = w0;
+		} else {
+			w0 = arm64_load_scrambled_word(ad, buffer, 0u);
+			w0 *= arm64_gw_inverse_weight(ad, 0u);
+			w0 += wrap_carry;
+			w0 *= arm64_gw_forward_weight(ad, 0u);
+			arm64_store_scrambled_word(ad, buffer, 0u, w0);
+		}
 	}
 
 	if (errchk && maxerr > ad->MAXERR) {
