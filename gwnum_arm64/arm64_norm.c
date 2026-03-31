@@ -5,9 +5,6 @@
 
 #include <math.h>
 #include <stddef.h>
-#ifdef ARM64_DIAGNOSTICS
-#include <stdio.h>
-#endif
 
 static inline size_t arm64_word_offset_bytes(const struct gwasm_data *ad, size_t word) {
 	if (ad != NULL && ad->gwdata != NULL) {
@@ -27,8 +24,7 @@ static inline void arm64_store_scrambled_word(const struct gwasm_data *ad, doubl
 }
 
 /* Use gwnum's own double-double precision weight functions for exact compatibility
-   with set_fft_value/get_fft_value. Our first-principles pow() computation has
-   insufficient precision, causing errors that compound over iterations. */
+   with set_fft_value/get_fft_value. */
 
 static inline double arm64_gw_forward_weight(const struct gwasm_data *ad, size_t word) {
 	if (ad != NULL && ad->gwdata != NULL && ad->gwdata->dd_data != NULL) {
@@ -46,6 +42,20 @@ static inline double arm64_gw_inverse_weight(const struct gwasm_data *ad, size_t
 	return arm64_inverse_weight_at(ad, word);
 }
 
+/* Convert ADDIN_OFFSET (byte offset into FFT buffer) to a logical word index
+   by finding the word whose addr_offset matches. Returns FFTLEN (invalid) if
+   no match is found. */
+static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, uint32_t byte_offset) {
+	size_t words, w;
+	if (ad == NULL || ad->gwdata == NULL) return 0;
+	words = arm64_data_words(ad);
+	for (w = 0; w < words; ++w) {
+		if ((uint32_t)addr_offset(ad->gwdata, (unsigned long)w) == byte_offset)
+			return w;
+	}
+	return words; /* not found */
+}
+
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
 	struct gwasm_data *ad = asm_data;
 	size_t words;
@@ -54,7 +64,9 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	double maxerr;
 	int use_mulconst;
 	double mulconst;
-	size_t addin_offset;
+	size_t addin_word;
+	double addin_integer;
+	double postaddin_integer;
 
 	if (ad == NULL || buffer == NULL) return;
 
@@ -64,35 +76,29 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	maxerr = ad->MAXERR;
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
-	addin_offset = (size_t)ad->ADDIN_OFFSET;
 
-	/* Apply ADDIN_VALUE directly to the physical FFT buffer at ADDIN_OFFSET,
-	   matching exactly what the x86 assembly normalization does. The x86 code
-	   adds ADDIN_VALUE to the raw weighted double at the byte offset BEFORE
-	   any per-word unweighting and carry propagation. */
-	if (ad->ADDIN_VALUE != 0.0 || ad->POSTADDIN_VALUE != 0.0) {
-		double *addin_ptr = (double *)((char *)buffer + addin_offset);
-#ifdef ARM64_DIAGNOSTICS
-		{
-			static int addin_debug_count = 0;
-			if (addin_debug_count < 3) {
-				double before = *addin_ptr;
-				double w0_before = arm64_load_scrambled_word(ad, buffer, 0u);
-				*addin_ptr += ad->ADDIN_VALUE;
-				*addin_ptr += ad->POSTADDIN_VALUE;
-				fprintf(stderr, "[ARM64 ADDIN] offset=%u val=%.6g post=%.6g ptr_before=%.6g ptr_after=%.6g w0_before=%.6g w0_after=%.6g\n",
-					(unsigned)addin_offset, ad->ADDIN_VALUE, ad->POSTADDIN_VALUE,
-					before, *addin_ptr, w0_before, arm64_load_scrambled_word(ad, buffer, 0u));
-				addin_debug_count++;
-			} else {
-				*addin_ptr += ad->ADDIN_VALUE;
-				*addin_ptr += ad->POSTADDIN_VALUE;
-			}
-		}
-#else
-		*addin_ptr += ad->ADDIN_VALUE;
-		*addin_ptr += ad->POSTADDIN_VALUE;
-#endif
+	/* Convert ADDIN_OFFSET from byte offset to logical word index. */
+	addin_word = arm64_addin_offset_to_word(ad, ad->ADDIN_OFFSET);
+
+	/* raw_gwsetaddin pre-multiplies ADDIN_VALUE by weight(word) * FFTLEN/2 / k
+	   for the x86 assembly normalization which operates on raw FFT output
+	   (still weighted and scaled by FFTLEN/2). Our normalization works in the
+	   unweighted integer domain after IFFT scaling and weight removal, so we
+	   undo this pre-scaling to recover the actual integer addin value.
+	   Formula: integer_addin = ADDIN_VALUE / (weight(addin_word) * FFTLEN/2 / k) */
+	addin_integer = 0.0;
+	postaddin_integer = ad->POSTADDIN_VALUE;  /* POSTADDIN is not pre-scaled by weight*FFTLEN/2/k */
+	if (ad->ADDIN_VALUE != 0.0 && ad->gwdata != NULL && addin_word < words) {
+		double k = ad->gwdata->k;
+		double fftlen_half = (double)ad->gwdata->FFTLEN * 0.5;
+		double weight_at_addin = arm64_gw_forward_weight(ad, addin_word);
+		double prescale;
+		if (k == 0.0) k = 1.0;  /* guard against divide-by-zero */
+		prescale = weight_at_addin * fftlen_half / k;
+		if (prescale != 0.0)
+			addin_integer = ad->ADDIN_VALUE / prescale;
+		else
+			addin_integer = ad->ADDIN_VALUE;
 	}
 
 	for (word = 0; word < words; ++word) {
@@ -110,6 +116,12 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 		/* Optional mulconst path. */
 		if (use_mulconst) value *= mulconst;
+
+		/* Optional addin at the configured word (in unweighted integer domain). */
+		if (word == addin_word) {
+			value += addin_integer;
+			value += postaddin_integer;
+		}
 
 		/* Round to nearest integer and track roundoff error. */
 		rounded = nearbyint(value);
