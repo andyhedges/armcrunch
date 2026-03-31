@@ -4,6 +4,7 @@ set -e
 # Configurable paths
 ARMCRUNCH_DIR="${ARMCRUNCH_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PRST_DIR="${PRST_DIR:-$HOME/code/prst}"
+VANILLA_PRST="${ARMCRUNCH_DIR}/prst"
 
 cd "$ARMCRUNCH_DIR"
 
@@ -23,7 +24,6 @@ if [ -d "$PRST_DIR/src" ]; then
         echo "  Framework submodule not found, initializing..."
         cd "$PRST_DIR"
         git submodule update --init --recursive 2>/dev/null || true
-        # If submodule still not there, clone directly via HTTPS
         if [ ! -f "$PRST_DIR/framework/md5.c" ]; then
             echo "  Submodule init failed, cloning framework directly..."
             rm -rf "$PRST_DIR/framework"
@@ -32,11 +32,9 @@ if [ -d "$PRST_DIR/src" ]; then
         cd "$ARMCRUNCH_DIR/gwnum_arm64"
     fi
 
-    # Verify framework exists
     if [ ! -f "$PRST_DIR/framework/md5.c" ]; then
         echo "=== ERROR: PRST framework sources not found, skipping PRST build ==="
-        echo "=== gwnum.a is ready at $ARMCRUNCH_DIR/gwnum_arm64/gwnum.a ==="
-        exit 0
+        exit 1
     fi
 
     # Install gwnum.a
@@ -124,8 +122,127 @@ else:
     rm -f logging.h
     make
 
-    echo "=== PRST built successfully, running test ==="
-    ./prst "2^1279-1"
+    echo "=== PRST built successfully ==="
+    ARM64_PRST="$PRST_DIR/src/macarm64/prst"
+
+    # Validate ARM64 binary exists and is executable
+    if [ ! -x "$ARM64_PRST" ]; then
+        echo "ERROR: ARM64 PRST binary not found or not executable at $ARM64_PRST"
+        exit 1
+    fi
+
+    # Step 3: Benchmark comparison
+    # Known Mersenne primes of increasing size for benchmarking
+    BENCHMARKS=(
+        "2^1279-1"
+        "2^2203-1"
+        "2^4253-1"
+        "2^9689-1"
+        "2^19937-1"
+    )
+
+    echo ""
+    echo "============================================"
+    echo "  BENCHMARK: ARM64 native vs Vanilla (Rosetta)"
+    echo "============================================"
+    echo ""
+
+    # Check vanilla binary
+    HAVE_VANILLA=0
+    if [ -x "$VANILLA_PRST" ]; then
+        VANILLA_ARCH=$(file "$VANILLA_PRST" 2>/dev/null | grep -o 'x86_64\|arm64' | head -1)
+        echo "Vanilla binary: $VANILLA_PRST ($VANILLA_ARCH)"
+        HAVE_VANILLA=1
+    else
+        echo "WARNING: Vanilla PRST binary not found at $VANILLA_PRST"
+        echo "  Only ARM64 timings will be reported."
+    fi
+    echo "ARM64 binary:  $ARM64_PRST"
+    echo ""
+
+    # Create a temp directory for benchmark runs to avoid checkpoint interference
+    BENCH_DIR=$(mktemp -d)
+
+    BENCH_FAILURES=0
+
+    for NUM in "${BENCHMARKS[@]}"; do
+        echo "--- $NUM ---"
+
+        # Clean any leftover checkpoint files
+        rm -f "$BENCH_DIR"/*.txt "$BENCH_DIR"/*.param 2>/dev/null
+
+        # ARM64 native build
+        ARM64_TIME=""
+        ARM64_RESULT=""
+        cd "$BENCH_DIR"
+        if ARM64_OUT=$("$ARM64_PRST" "$NUM" 2>&1); then
+            ARM64_TIME=$(echo "$ARM64_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
+            ARM64_RESULT=$(echo "$ARM64_OUT" | grep -E 'prime|composite' | head -1)
+        else
+            ARM64_EXIT=$?
+            # PRST returns exit code 2 for "prime found" which is not an error
+            if [ $ARM64_EXIT -eq 2 ]; then
+                ARM64_TIME=$(echo "$ARM64_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
+                ARM64_RESULT=$(echo "$ARM64_OUT" | grep -E 'prime|composite' | head -1)
+            else
+                echo "  ARM64:   FAILED (exit code $ARM64_EXIT)"
+                BENCH_FAILURES=$((BENCH_FAILURES + 1))
+            fi
+        fi
+
+        # Clean checkpoints between runs
+        rm -f "$BENCH_DIR"/*.txt "$BENCH_DIR"/*.param 2>/dev/null
+
+        # Vanilla (Rosetta x86-64) build
+        VANILLA_TIME=""
+        VANILLA_RESULT=""
+        if [ "$HAVE_VANILLA" -eq 1 ]; then
+            cd "$BENCH_DIR"
+            if VANILLA_OUT=$("$VANILLA_PRST" "$NUM" 2>&1); then
+                VANILLA_TIME=$(echo "$VANILLA_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
+                VANILLA_RESULT=$(echo "$VANILLA_OUT" | grep -E 'prime|composite' | head -1)
+            else
+                VANILLA_EXIT=$?
+                if [ $VANILLA_EXIT -eq 2 ]; then
+                    VANILLA_TIME=$(echo "$VANILLA_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
+                    VANILLA_RESULT=$(echo "$VANILLA_OUT" | grep -E 'prime|composite' | head -1)
+                else
+                    echo "  Vanilla: FAILED (exit code $VANILLA_EXIT)"
+                fi
+            fi
+            rm -f "$BENCH_DIR"/*.txt "$BENCH_DIR"/*.param 2>/dev/null
+        fi
+
+        # Report results
+        if [ -n "$ARM64_TIME" ]; then
+            echo "  ARM64:   ${ARM64_TIME}s  $ARM64_RESULT"
+        fi
+        if [ -n "$VANILLA_TIME" ]; then
+            echo "  Vanilla: ${VANILLA_TIME}s  $VANILLA_RESULT"
+        fi
+        if [ -n "$ARM64_TIME" ] && [ -n "$VANILLA_TIME" ]; then
+            SPEEDUP=$(python3 -c "
+a = float('$ARM64_TIME')
+v = float('$VANILLA_TIME')
+if a > 0:
+    print(f'{v/a:.2f}x')
+else:
+    print('N/A')
+" 2>/dev/null)
+            echo "  Speedup: $SPEEDUP"
+        fi
+        echo ""
+    done
+
+    # Cleanup temp directory
+    rm -rf "$BENCH_DIR"
+
+    echo "============================================"
+
+    if [ "$BENCH_FAILURES" -gt 0 ]; then
+        echo "WARNING: $BENCH_FAILURES benchmark(s) failed"
+    fi
+
 else
     echo "=== PRST not found at $PRST_DIR, skipping PRST build ==="
     echo "=== gwnum.a is ready at $ARMCRUNCH_DIR/gwnum_arm64/gwnum.a ==="
