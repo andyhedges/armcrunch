@@ -23,6 +23,9 @@ void arm64_gw_addq(struct gwasm_data *asm_data) {
 	size_t i;
 
 	if (ad == NULL) return;
+
+	if (ad->gwdata != NULL) ad->gwdata->careful_count = 0;
+
 	/* gwnum sets SRCARG=s1, SRC2ARG=s2, DESTARG=d; compute d = s1 + s2 */
 	dst = (double *)ad->DESTARG;
 	s1 = (const double *)ad->SRCARG;
@@ -196,6 +199,9 @@ void arm64_gw_muls(struct gwasm_data *asm_data) {
 	double mul;
 
 	if (ad == NULL) return;
+
+	if (ad->gwdata != NULL) ad->gwdata->careful_count = 0;
+
 	dst = (double *)ad->DESTARG;
 	src = (const double *)ad->SRCARG;
 	words = arm64_aux_words(ad);
