@@ -16,6 +16,9 @@
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
+#ifdef ARM64_DIAGNOSTICS
+#include <stdio.h>
+#endif
 #include "cpuid.h"
 #include "gwnum.h"
 #include "gwtables.h"
@@ -231,4 +234,83 @@ void arm64_gwsetup_hook(gwhandle *gwdata)
 	/* Disable gwmul3_carefully — our backend doesn't support the FMA-based
 	   gwaddsub4o + gwmuladd4 path that gwmul3_carefully uses. */
 	gwdata->careful_count = 0;
+
+#ifdef ARM64_DIAGNOSTICS
+	/* Diagnostic tests gated by -DARM64_DIAGNOSTICS compile flag.
+	   Tests the exact round-trip paths that PRST uses for init checks. */
+	{
+		gwnum test_g;
+		giant test_giant;
+		int conv_err;
+
+		test_g = gwalloc(gwdata);
+		if (test_g != NULL) {
+			/* Test 1: gianttogw(3) -> gwtogiant round-trip */
+			test_giant = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+			itog(3, test_giant);
+			gianttogw(gwdata, test_giant, test_g);
+			{
+				giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+				conv_err = gwtogiant(gwdata, test_g, result);
+				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3) {
+					fprintf(stderr, "[ARM64 DIAG] gianttogw(3)->gwtogiant = 3 OK\n");
+				} else {
+					fprintf(stderr, "[ARM64 DIAG] gianttogw(3)->gwtogiant FAILED: conv=%d sign=%d",
+						conv_err, result->sign);
+					if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+					if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+					fprintf(stderr, "\n");
+					{
+						unsigned long j;
+						fprintf(stderr, "[ARM64 DIAG] raw fft words[0..7]: ");
+						for (j = 0; j < 8 && j < gwdata->FFTLEN; j++) {
+							long wv = 0;
+							get_fft_value(gwdata, test_g, j, &wv);
+							fprintf(stderr, "%ld ", wv);
+						}
+						fprintf(stderr, "\n");
+					}
+				}
+				pushg(&gwdata->gdata, 1);
+			}
+			pushg(&gwdata->gdata, 1);
+
+			/* Test 2: dbltogw(3) -> gwtogiant */
+			dbltogw(gwdata, 3.0, test_g);
+			{
+				giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+				conv_err = gwtogiant(gwdata, test_g, result);
+				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 3) {
+					fprintf(stderr, "[ARM64 DIAG] dbltogw(3)->gwtogiant = 3 OK\n");
+				} else {
+					fprintf(stderr, "[ARM64 DIAG] dbltogw(3)->gwtogiant FAILED: conv=%d sign=%d",
+						conv_err, result->sign);
+					if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+					fprintf(stderr, "\n");
+				}
+				pushg(&gwdata->gdata, 1);
+			}
+
+			/* Test 3: gwsquare2(3) = 9 */
+			dbltogw(gwdata, 3.0, test_g);
+			gwsquare2(gwdata, test_g, test_g, 0);
+			{
+				giant result = popg(&gwdata->gdata, ((unsigned long)gwdata->bit_length >> 5) + 5);
+				conv_err = gwtogiant(gwdata, test_g, result);
+				if (conv_err >= 0 && result->sign == 1 && result->n[0] == 9) {
+					fprintf(stderr, "[ARM64 DIAG] gwsquare2(3) = 9 OK\n");
+				} else {
+					fprintf(stderr, "[ARM64 DIAG] gwsquare2(3) FAILED: conv=%d sign=%d",
+						conv_err, result->sign);
+					if (result->sign >= 1) fprintf(stderr, " n[0]=%u", result->n[0]);
+					if (result->sign >= 2) fprintf(stderr, " n[1]=%u", result->n[1]);
+					fprintf(stderr, "\n");
+				}
+				pushg(&gwdata->gdata, 1);
+			}
+
+			gwfree(gwdata, test_g);
+		}
+	}
+#endif /* ARM64_DIAGNOSTICS */
 }
