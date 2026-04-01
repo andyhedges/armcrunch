@@ -112,7 +112,7 @@ static size_t arm64_addin_offset_to_word(const struct gwasm_data *ad, const arm6
 	return words;
 }
 
-void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode) {
+void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode, int post_fft) {
 	struct gwasm_data *ad = asm_data;
 	const arm64_word_cache *cache = NULL;
 	const size_t *byte_offsets = NULL;
@@ -130,6 +130,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	size_t addin_word;
 	double addin_integer;
 	double postaddin_integer;
+	double k_factor;
 
 	if (ad == NULL || buffer == NULL) return;
 
@@ -156,6 +157,8 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	maxerr = ad->MAXERR;
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
+
+	k_factor = (post_fft && ad->gwdata != NULL && ad->gwdata->k > 1.0) ? ad->gwdata->k : 1.0;
 
 	/* Convert ADDIN_OFFSET from byte offset to logical word index. */
 	addin_word = arm64_addin_offset_to_word(ad, use_cached_tables ? cache : NULL, ad->ADDIN_OFFSET);
@@ -199,6 +202,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			value *= inv_weights[word];
 
 			if (use_mulconst) value *= mulconst;
+			value *= k_factor;
 
 			if (word == addin_word) {
 				value += addin_integer;
@@ -240,14 +244,13 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 
 			/* Optional mulconst path. */
 			if (use_mulconst) value *= mulconst;
+			value *= k_factor;
 
-			/* Optional addin at the configured word (in unweighted integer domain). */
 			if (word == addin_word) {
 				value += addin_integer;
 				value += postaddin_integer;
 			}
 
-			/* Round to nearest integer and track roundoff error. */
 			rounded = nearbyint(value);
 			if (errchk) {
 				double err = fabs(value - rounded);
@@ -386,7 +389,7 @@ void arm64_norm_plain(struct gwasm_data *asm_data) {
 	if (ad == NULL) return;
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
-	arm64_normalize_buffer(asm_data, dest, 0, 0);
+	arm64_normalize_buffer(asm_data, dest, 0, 0, 1);
 }
 
 void arm64_norm_errchk(struct gwasm_data *asm_data) {
@@ -395,7 +398,7 @@ void arm64_norm_errchk(struct gwasm_data *asm_data) {
 	if (ad == NULL) return;
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
-	arm64_normalize_buffer(asm_data, dest, 1, 0);
+	arm64_normalize_buffer(asm_data, dest, 1, 0, 1);
 }
 
 void arm64_norm_mulconst(struct gwasm_data *asm_data) {
@@ -404,7 +407,7 @@ void arm64_norm_mulconst(struct gwasm_data *asm_data) {
 	if (ad == NULL) return;
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
-	arm64_normalize_buffer(asm_data, dest, 0, 1);
+	arm64_normalize_buffer(asm_data, dest, 0, 1, 1);
 }
 
 void arm64_norm_errchk_mulconst(struct gwasm_data *asm_data) {
@@ -413,5 +416,5 @@ void arm64_norm_errchk_mulconst(struct gwasm_data *asm_data) {
 	if (ad == NULL) return;
 	dest = (double *)ad->DESTARG;
 	if (dest == NULL) return;
-	arm64_normalize_buffer(asm_data, dest, 1, 1);
+	arm64_normalize_buffer(asm_data, dest, 1, 1, 1);
 }
