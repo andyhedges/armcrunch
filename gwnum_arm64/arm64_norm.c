@@ -4,6 +4,7 @@
 #include "gwtables.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stddef.h>
 
 typedef struct arm64_word_cache {
@@ -179,6 +180,16 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			addin_integer = ad->ADDIN_VALUE / prescale;
 		else
 			addin_integer = ad->ADDIN_VALUE;
+	}
+
+	if (ad->ADDIN_VALUE != 0.0 && addin_word >= words) {
+		static int addin_warned = 0;
+		if (!addin_warned) {
+			fprintf(stderr, "[ARM64 NORM] ADDIN LOST: ADDIN_OFFSET=%u not found in %zu words, ADDIN_VALUE=%.6g k=%.1f\n",
+				(unsigned)ad->ADDIN_OFFSET, words, ad->ADDIN_VALUE,
+				ad->gwdata ? ad->gwdata->k : 0.0);
+			addin_warned = 1;
+		}
 	}
 
 	if (use_cached_tables) {

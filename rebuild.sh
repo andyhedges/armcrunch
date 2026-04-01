@@ -159,29 +159,45 @@ else:
         # Clean any leftover checkpoint files
         rm -f "$BENCH_DIR"/*.txt "$BENCH_DIR"/*.param 2>/dev/null
 
-        # ARM64 native build
-        ARM64_TIME=""
-        ARM64_RESULT=""
-        cd "$BENCH_DIR"
-        if ARM64_OUT=$("$ARM64_PRST" "$NUM" 2>&1); then
-            ARM64_TIME=$(echo "$ARM64_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
-            ARM64_RESULT=$(echo "$ARM64_OUT" | grep -E 'prime|composite' | head -1)
-        else
-            ARM64_EXIT=$?
-            # PRST returns exit code 2 for "prime found" which is not an error
-            if [ $ARM64_EXIT -eq 2 ]; then
-                ARM64_TIME=$(echo "$ARM64_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
-                ARM64_RESULT=$(echo "$ARM64_OUT" | grep -E 'prime|composite' | head -1)
+        # Detect timeout command (GNU coreutils timeout or macOS gtimeout)
+        TIMEOUT_CMD="timeout"
+        if ! command -v timeout >/dev/null 2>&1; then
+            if command -v gtimeout >/dev/null 2>&1; then
+                TIMEOUT_CMD="gtimeout"
             else
-                echo "  ARM64:   FAILED (exit code $ARM64_EXIT)"
-                echo "$ARM64_OUT" | grep '\[ARM64' || true
-                BENCH_FAILURES=$((BENCH_FAILURES + 1))
+                TIMEOUT_CMD=""
             fi
         fi
 
-        # Report results
-        if [ -n "$ARM64_TIME" ]; then
-            echo "  ARM64:   ${ARM64_TIME}s  $ARM64_RESULT"
+        # Run with timeout, capturing exit code correctly
+        cd "$BENCH_DIR"
+        set +e
+        if [ -n "$TIMEOUT_CMD" ]; then
+            ARM64_OUT=$($TIMEOUT_CMD 30 "$ARM64_PRST" "$NUM" 2>&1)
+            ARM64_EXIT=$?
+        else
+            ARM64_OUT=$("$ARM64_PRST" "$NUM" 2>&1)
+            ARM64_EXIT=$?
+        fi
+        set -e
+
+        # Print ALL diagnostic lines from this run
+        echo "$ARM64_OUT" | grep '\[ARM64' || true
+
+        if [ $ARM64_EXIT -eq 124 ] || [ $ARM64_EXIT -eq 137 ]; then
+            echo "  ARM64:   TIMEOUT (killed after 30s)"
+            BENCH_FAILURES=$((BENCH_FAILURES + 1))
+        elif [ $ARM64_EXIT -eq 0 ] || [ $ARM64_EXIT -eq 2 ]; then
+            ARM64_TIME=$(echo "$ARM64_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
+            ARM64_RESULT=$(echo "$ARM64_OUT" | grep -E 'prime|composite' | head -1)
+            if [ -n "$ARM64_TIME" ]; then
+                echo "  ARM64:   ${ARM64_TIME}s  $ARM64_RESULT"
+            elif [ -n "$ARM64_RESULT" ]; then
+                echo "  ARM64:   $ARM64_RESULT"
+            fi
+        else
+            echo "  ARM64:   FAILED (exit code $ARM64_EXIT)"
+            BENCH_FAILURES=$((BENCH_FAILURES + 1))
         fi
         echo ""
     done
