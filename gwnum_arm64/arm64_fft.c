@@ -957,7 +957,7 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	if (ffttype == 1u) return;
 
 	if (ffttype == 2u || ffttype == 3u || ffttype == 4u) {
-		required_doubles = 2u * words;
+		required_doubles = 2u * words + 4u;
 		if (!arm64_reserve_tls_buffer(&arm64_tls_tmp1, &arm64_tls_tmp1_capacity, required_doubles)) return;
 		tmp1 = arm64_tls_tmp1;
 		if (!arm64_reserve_tls_buffer(&arm64_tls_tmp2, &arm64_tls_tmp2_capacity, required_doubles)) return;
@@ -991,44 +991,78 @@ void arm64_fft_entry(struct gwasm_data *asm_data) {
 	}
 
 	case 3:
+	{
+		size_t half;
+		size_t spec_len;
+		double *spec1, *spec2;
+		const arm64_real_fft_twiddles *real_tw;
+
+		half = words / 2u;
+		if (half == 0u || !arm64_is_power_of_two(half)) { ok = 0; break; }
+
+		real_tw = arm64_get_real_fft_twiddles(words);
+		if (real_tw == NULL || real_tw->twiddles == NULL) { ok = 0; break; }
+
+		spec_len = (half + 1u) * 2u;
+		spec1 = tmp2;
+		spec2 = tmp2 + spec_len;
+
 		ok = arm64_unscramble(ad, word_cache, s1, tmp1);
 		if (!ok) break;
-		ok = arm64_pack_real_to_complex(tmp1, tmp1, words);
+		arm64_fft(tmp1, half, 0);
+		arm64_real_fft_split(tmp1, spec1, half, real_tw->twiddles);
+
+		ok = arm64_unscramble(ad, word_cache, s2, tmp1);
 		if (!ok) break;
-		ok = arm64_unscramble(ad, word_cache, s2, tmp2);
-		if (!ok) break;
-		ok = arm64_pack_real_to_complex(tmp2, tmp2, words);
-		if (!ok) break;
-		arm64_fft(tmp1, complex_len, 0);
-		arm64_fft(tmp2, complex_len, 0);
-		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
-		arm64_fft(tmp1, complex_len, 1);
-		ok = arm64_extract_real(tmp1, tmp1, words);
-		if (!ok) break;
+		arm64_fft(tmp1, half, 0);
+		arm64_real_fft_split(tmp1, spec2, half, real_tw->twiddles);
+
+		arm64_pointwise_mul(spec1, spec1, spec2, half + 1u);
+		arm64_enforce_hermitian(spec1, half);
+		arm64_real_fft_merge(spec1, tmp1, half, real_tw->twiddles);
+		arm64_fft(tmp1, half, 1);
 		ok = arm64_rescramble(ad, word_cache, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
 		break;
+	}
 
 	case 4:
+	{
+		size_t half;
+		size_t spec_len;
+		double *spec1, *spec2;
+		const arm64_real_fft_twiddles *real_tw;
+
+		half = words / 2u;
+		if (half == 0u || !arm64_is_power_of_two(half)) { ok = 0; break; }
+
+		real_tw = arm64_get_real_fft_twiddles(words);
+		if (real_tw == NULL || real_tw->twiddles == NULL) { ok = 0; break; }
+
+		spec_len = (half + 1u) * 2u;
+		spec1 = tmp2;
+		spec2 = tmp2 + spec_len;
+
 		ok = arm64_unscramble(ad, word_cache, s1, tmp1);
 		if (!ok) break;
-		ok = arm64_pack_real_to_complex(tmp1, tmp1, words);
+		arm64_fft(tmp1, half, 0);
+		arm64_real_fft_split(tmp1, spec1, half, real_tw->twiddles);
+
+		ok = arm64_unscramble(ad, word_cache, s2, tmp1);
 		if (!ok) break;
-		ok = arm64_unscramble(ad, word_cache, s2, tmp2);
-		if (!ok) break;
-		ok = arm64_pack_real_to_complex(tmp2, tmp2, words);
-		if (!ok) break;
-		arm64_fft(tmp1, complex_len, 0);
-		arm64_fft(tmp2, complex_len, 0);
-		arm64_pointwise_mul(tmp1, tmp1, tmp2, complex_len);
-		arm64_fft(tmp1, complex_len, 1);
-		ok = arm64_extract_real(tmp1, tmp1, words);
-		if (!ok) break;
+		arm64_fft(tmp1, half, 0);
+		arm64_real_fft_split(tmp1, spec2, half, real_tw->twiddles);
+
+		arm64_pointwise_mul(spec1, spec1, spec2, half + 1u);
+		arm64_enforce_hermitian(spec1, half);
+		arm64_real_fft_merge(spec1, tmp1, half, real_tw->twiddles);
+		arm64_fft(tmp1, half, 1);
 		ok = arm64_rescramble(ad, word_cache, tmp1, dest);
 		if (!ok) break;
 		arm64_normalize(asm_data);
 		break;
+	}
 
 	case 5:
 		arm64_normalize(asm_data);
