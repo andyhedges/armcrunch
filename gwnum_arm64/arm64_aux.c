@@ -90,7 +90,7 @@ void arm64_gw_add(struct gwasm_data *asm_data) {
 	arm64_gw_addq(asm_data);
 
 	if (ad != NULL && ad->DESTARG != NULL) {
-		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0);
+		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0, 0);
 	}
 }
 
@@ -118,7 +118,7 @@ void arm64_gw_sub(struct gwasm_data *asm_data) {
 	arm64_gw_subq(asm_data);
 
 	if (ad != NULL && ad->DESTARG != NULL) {
-		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0);
+		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0, 0);
 	}
 }
 
@@ -169,11 +169,11 @@ void arm64_gw_addsub(struct gwasm_data *asm_data) {
 	arm64_gw_addsubq(asm_data);
 
 	if (ad->DESTARG != NULL) {
-		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0);
+		arm64_normalize_buffer(asm_data, (double *)ad->DESTARG, 0, 0, 0);
 	}
 
 	if (ad->DEST2ARG != NULL && ad->DEST2ARG != ad->DESTARG) {
-		arm64_normalize_buffer(asm_data, (double *)ad->DEST2ARG, 0, 0);
+		arm64_normalize_buffer(asm_data, (double *)ad->DEST2ARG, 0, 0, 0);
 	}
 }
 
@@ -240,5 +240,5 @@ void arm64_gw_muls(struct gwasm_data *asm_data) {
 	}
 #endif
 
-	arm64_normalize_buffer(asm_data, dst, 0, 0);
+	arm64_normalize_buffer(asm_data, dst, 0, 0, 0);
 }
