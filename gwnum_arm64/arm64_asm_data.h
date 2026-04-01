@@ -252,7 +252,7 @@ void arm64_norm_mulconst(struct gwasm_data *asm_data);
 void arm64_norm_errchk_mulconst(struct gwasm_data *asm_data);
 
 /* Shared normalizer used by FFT and aux paths */
-void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode, int post_fft);
+void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode);
 
 /* gwinfo/jmptab */
 const struct gwasm_jmptab *arm64_gwinfo1(int negacyclic);
