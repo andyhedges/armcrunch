@@ -4,7 +4,6 @@ set -e
 # Configurable paths
 ARMCRUNCH_DIR="${ARMCRUNCH_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PRST_DIR="${PRST_DIR:-$HOME/code/prst}"
-VANILLA_PRST="${ARMCRUNCH_DIR}/prst"
 
 cd "$ARMCRUNCH_DIR"
 
@@ -134,10 +133,6 @@ else:
     # Step 3: Benchmark comparison
     BENCHMARKS=(
         "2^1279-1"
-        "2^2203-1"
-        "2^4253-1"
-        "2^9689-1"
-        "2^19937-1"
         "3*2^4000-1"
         "5*2^10000-1"
         "7*2^1000-1"
@@ -146,20 +141,10 @@ else:
 
     echo ""
     echo "============================================"
-    echo "  BENCHMARK: ARM64 native vs Vanilla (Rosetta)"
+    echo "  BENCHMARK: ARM64 native"
     echo "============================================"
     echo ""
 
-    # Check vanilla binary
-    HAVE_VANILLA=0
-    if [ -x "$VANILLA_PRST" ]; then
-        VANILLA_ARCH=$(file "$VANILLA_PRST" 2>/dev/null | grep -o 'x86_64\|arm64' | head -1)
-        echo "Vanilla binary: $VANILLA_PRST ($VANILLA_ARCH)"
-        HAVE_VANILLA=1
-    else
-        echo "WARNING: Vanilla PRST binary not found at $VANILLA_PRST"
-        echo "  Only ARM64 timings will be reported."
-    fi
     echo "ARM64 binary:  $ARM64_PRST"
     echo ""
 
@@ -194,46 +179,9 @@ else:
             fi
         fi
 
-        # Clean checkpoints between runs
-        rm -f "$BENCH_DIR"/*.txt "$BENCH_DIR"/*.param 2>/dev/null
-
-        # Vanilla (Rosetta x86-64) build
-        VANILLA_TIME=""
-        VANILLA_RESULT=""
-        if [ "$HAVE_VANILLA" -eq 1 ]; then
-            cd "$BENCH_DIR"
-            if VANILLA_OUT=$("$VANILLA_PRST" "$NUM" 2>&1); then
-                VANILLA_TIME=$(echo "$VANILLA_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
-                VANILLA_RESULT=$(echo "$VANILLA_OUT" | grep -E 'prime|composite' | head -1)
-            else
-                VANILLA_EXIT=$?
-                if [ $VANILLA_EXIT -eq 2 ]; then
-                    VANILLA_TIME=$(echo "$VANILLA_OUT" | grep -o 'Time: [0-9.]*' | head -1 | awk '{print $2}')
-                    VANILLA_RESULT=$(echo "$VANILLA_OUT" | grep -E 'prime|composite' | head -1)
-                else
-                    echo "  Vanilla: FAILED (exit code $VANILLA_EXIT)"
-                fi
-            fi
-            rm -f "$BENCH_DIR"/*.txt "$BENCH_DIR"/*.param 2>/dev/null
-        fi
-
         # Report results
         if [ -n "$ARM64_TIME" ]; then
             echo "  ARM64:   ${ARM64_TIME}s  $ARM64_RESULT"
-        fi
-        if [ -n "$VANILLA_TIME" ]; then
-            echo "  Vanilla: ${VANILLA_TIME}s  $VANILLA_RESULT"
-        fi
-        if [ -n "$ARM64_TIME" ] && [ -n "$VANILLA_TIME" ]; then
-            SPEEDUP=$(python3 -c "
-a = float('$ARM64_TIME')
-v = float('$VANILLA_TIME')
-if a > 0:
-    print(f'{v/a:.2f}x')
-else:
-    print('N/A')
-" 2>/dev/null)
-            echo "  Speedup: $SPEEDUP"
         fi
         echo ""
     done
