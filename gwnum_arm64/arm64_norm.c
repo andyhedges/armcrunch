@@ -158,7 +158,7 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 	maxerr = ad->MAXERR;
 	use_mulconst = (mulconst_mode != 0) || (ad->const_fft != 0);
 	mulconst = use_mulconst ? arm64_mulconst(ad) : 1.0;
-	k_factor = (post_fft && ad->gwdata != NULL && ad->gwdata->k > 1.0) ? ad->gwdata->k : 1.0;
+	k_factor = (post_fft && arm64_get_used_real_fft() && ad->gwdata != NULL && ad->gwdata->k > 1.0) ? ad->gwdata->k : 1.0;
 
 	/* Convert ADDIN_OFFSET from byte offset to logical word index. */
 	addin_word = arm64_addin_offset_to_word(ad, use_cached_tables ? cache : NULL, ad->ADDIN_OFFSET);

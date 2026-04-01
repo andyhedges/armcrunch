@@ -254,6 +254,11 @@ void arm64_norm_errchk_mulconst(struct gwasm_data *asm_data);
 /* Shared normalizer used by FFT and aux paths */
 void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int errchk, int mulconst_mode, int post_fft);
 
+/* Returns 1 if the most recent FFT operation used N/2 real FFT (case 2 squaring),
+   0 if it used N-point complex FFT (case 3/4 multiply). Used by normalizer to
+   decide whether to apply k-factor for k>1. */
+int arm64_get_used_real_fft(void);
+
 /* gwinfo/jmptab */
 const struct gwasm_jmptab *arm64_gwinfo1(int negacyclic);
 const char *arm64_gwinfo_backend_version(void);
