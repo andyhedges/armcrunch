@@ -1,0 +1,13 @@
+# Build artifacts
+gwnum_arm64/build/
+gwnum_arm64/gwnum.a
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor/OS files
+.DS_Store
+*.swp
+*~
