@@ -285,23 +285,44 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 		}
 	}
 
-	/* Wraparound carry: multiply by -c, inject at word 0 (unweighted domain),
-	   then propagate any secondary carries. k>1 cases can require additional
-	   full wrap passes before the carry is fully absorbed. */
+	/* Wraparound carry for k*b^n+c:
+	   carry at b^n maps through b^n ≡ -c/k (mod k*b^n+c).
+	   Split carry*(-c) into quotient*k + remainder, inject quotient at word 0
+	   with wrap propagation, then inject accumulated remainder at top word. */
 	if (carry != 0.0) {
 		const arm64_asm_constants *ac = arm64_constants(ad);
 		double minus_c = 1.0;
+		double k_val = 1.0;
+		double carry_times_minus_c;
+		double quotient_carry;
+		double remainder;
 		double wrap_carry;
+		double remainder_accum;
 		int wrap_pass;
 		const int max_wrap_passes = 10;
 
-		if (ac != NULL && ac->NEON_MINUS_C != 0.0) {
-			minus_c = ac->NEON_MINUS_C;
-		} else if (ad->gwdata != NULL && ad->gwdata->c != 0) {
+		if (ad->gwdata != NULL && ad->gwdata->c != 0) {
 			minus_c = (double)(-ad->gwdata->c);
+		} else if (ac != NULL && ac->NEON_MINUS_C != 0.0) {
+			minus_c = ac->NEON_MINUS_C;
 		}
 
-		wrap_carry = carry * minus_c;
+		if (ad->gwdata != NULL && ad->gwdata->k != 0.0) {
+			k_val = ad->gwdata->k;
+		}
+		if (k_val <= 1.0) k_val = 1.0;
+
+		carry_times_minus_c = carry * minus_c;
+		if (k_val == 1.0) {
+			quotient_carry = carry_times_minus_c;
+			remainder = 0.0;
+		} else {
+			quotient_carry = floor(carry_times_minus_c / k_val);
+			remainder = carry_times_minus_c - quotient_carry * k_val;
+		}
+
+		wrap_carry = quotient_carry;
+		remainder_accum = remainder;
 
 		for (wrap_pass = 0; wrap_pass < max_wrap_passes && wrap_carry != 0.0; ++wrap_pass) {
 			double pass_carry = wrap_carry;
@@ -328,7 +349,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 						double err = fabs(value - rounded);
 						if (err > maxerr) maxerr = err;
 					}
-
 					rounded += pass_carry;
 					if (base != 0.0) {
 						carry_out = nearbyint(rounded * inv_base);
@@ -359,7 +379,6 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 						double err = fabs(value - rounded);
 						if (err > maxerr) maxerr = err;
 					}
-
 					rounded += pass_carry;
 					if (base != 0.0) {
 						carry_out = nearbyint(rounded * inv_base);
@@ -378,7 +397,76 @@ void arm64_normalize_buffer(struct gwasm_data *asm_data, double *buffer, int err
 			if (pass_carry == 0.0) {
 				wrap_carry = 0.0;
 			} else {
-				wrap_carry = pass_carry * minus_c;
+				carry_times_minus_c = pass_carry * minus_c;
+				if (k_val == 1.0) {
+					wrap_carry = carry_times_minus_c;
+				} else {
+					double pass_remainder;
+					wrap_carry = floor(carry_times_minus_c / k_val);
+					pass_remainder = carry_times_minus_c - wrap_carry * k_val;
+					remainder_accum += pass_remainder;
+				}
+			}
+		}
+
+		if (remainder_accum != 0.0) {
+			size_t top_word = words - 1;
+
+			if (use_cached_tables) {
+				double small_base = arm64_word_base(ad, 0);
+				double big_base_val = arm64_word_base(ad, 1);
+				double small_inv_base = arm64_word_base_inverse(ad, 0);
+				double big_inv_base = arm64_word_base_inverse(ad, 1);
+				double base = big_words[top_word] ? big_base_val : small_base;
+				double inv_base = big_words[top_word] ? big_inv_base : small_inv_base;
+				double value = *(double *)(buffer_bytes + byte_offsets[top_word]);
+				double rounded;
+				double carry_out;
+				double digit;
+				double stored;
+
+				value *= inv_weights[top_word];
+				rounded = nearbyint(value);
+				if (errchk) {
+					double err = fabs(value - rounded);
+					if (err > maxerr) maxerr = err;
+				}
+				rounded += remainder_accum;
+				if (base != 0.0) {
+					carry_out = nearbyint(rounded * inv_base);
+				} else {
+					carry_out = 0.0;
+				}
+
+				digit = rounded - carry_out * base;
+				stored = digit * fwd_weights[top_word];
+				*(double *)(buffer_bytes + byte_offsets[top_word]) = stored;
+			} else {
+				int big_word = arm64_is_big_word(ad, top_word);
+				double base = arm64_word_base(ad, big_word);
+				double inv_base = arm64_word_base_inverse(ad, big_word);
+				double value = arm64_load_scrambled_word(ad, buffer, top_word);
+				double rounded;
+				double carry_out;
+				double digit;
+				double stored;
+
+				value *= arm64_gw_inverse_weight(ad, top_word);
+				rounded = nearbyint(value);
+				if (errchk) {
+					double err = fabs(value - rounded);
+					if (err > maxerr) maxerr = err;
+				}
+				rounded += remainder_accum;
+				if (base != 0.0) {
+					carry_out = nearbyint(rounded * inv_base);
+				} else {
+					carry_out = 0.0;
+				}
+
+				digit = rounded - carry_out * base;
+				stored = digit * arm64_gw_forward_weight(ad, top_word);
+				arm64_store_scrambled_word(ad, buffer, top_word, stored);
 			}
 		}
 	}
